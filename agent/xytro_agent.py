@@ -275,25 +275,13 @@ def audit_entry(audit, entry):
         f.write(json.dumps(entry) + "\n")
 
 
-def main():
-    ap = argparse.ArgumentParser(description="xytro-agent (M3 autonomous brain)")
-    ap.add_argument("--seconds", type=int, default=30,
-                    help="observation window (s)")
-    ap.add_argument("--strategy", choices=list(STRATEGIES) + ["auto"],
-                    default="auto", help="force a strategy (default: auto)")
-    ap.add_argument("--live", action="store_true",
-                    help="apply steering (default: dry-run/advisory)")
-    ap.add_argument("--ab", action="store_true",
-                    help="A/B: measure after, auto-rollback on regression")
-    ap.add_argument("--audit", default=os.path.join(HERE, "audit.log"),
-                    help="append-only audit log path")
-    args = ap.parse_args()
-
+def run_once(args):
+    """One observe -> reason -> steer -> A/B cycle. Returns True on success."""
     pol, pout = get_policy()
     if pol["threshold"] is None:
         print("FATAL: cannot read policy (is xytro_sched attached + sudo warm?)")
         print(pout[:500])
-        sys.exit(1)
+        return False
 
     print("== xytro-agent: observing %ds (strategy=%s %s)" %
           (args.seconds, args.strategy,
@@ -331,7 +319,39 @@ def main():
                          "reason": "reward %0.3f < %0.3f" % (r1, r0)})
         else:
             print("  no regression -> keeping %s strategy" % strat)
-    print("== done; audit log: %s ==" % args.audit)
+    print("== cycle done; audit log: %s ==" % args.audit)
+    return True
+
+
+def main():
+    ap = argparse.ArgumentParser(description="xytro-agent (M3 autonomous brain)")
+    ap.add_argument("--seconds", type=int, default=30,
+                    help="observation window (s)")
+    ap.add_argument("--strategy", choices=list(STRATEGIES) + ["auto"],
+                    default="auto", help="force a strategy (default: auto)")
+    ap.add_argument("--live", action="store_true",
+                    help="apply steering (default: dry-run/advisory)")
+    ap.add_argument("--ab", action="store_true",
+                    help="A/B: measure after, auto-rollback on regression")
+    ap.add_argument("--audit", default=os.path.join(HERE, "audit.log"),
+                    help="append-only audit log path")
+    ap.add_argument("--daemon", action="store_true",
+                    help="loop forever (for the systemd boot service)")
+    ap.add_argument("--interval", type=int, default=120,
+                    help="seconds between daemon cycles")
+    args = ap.parse_args()
+
+    if args.daemon:
+        print("== xytro-agent daemon: %ds observe every %ds (live=%s ab=%s) =="
+              % (args.seconds, args.interval, args.live, args.ab))
+        while True:
+            try:
+                run_once(args)
+            except Exception as e:  # noqa: BLE001
+                print("cycle error: %s" % e)
+            time.sleep(args.interval)
+    else:
+        run_once(args)
 
 
 if __name__ == "__main__":

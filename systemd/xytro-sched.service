@@ -1,0 +1,19 @@
+[Unit]
+Description=xytro-sched AI CPU scheduler (sched_ext/BPF)
+Documentation=https://github.com/xytrolabs/xytro-sched
+After=local-fs.target
+Wants=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/home/raf/Desktop/Linux-Xytro/systemd/xytro-sched-start.sh
+Environment=XYTRO_BASE=/home/raf/Desktop/Linux-Xytro
+Restart=on-failure
+RestartSec=3
+# The scheduler must never be OOM-killed silently; stop the unit if it is.
+OOMPolicy=stop
+# Keep the service alive as long as the kernel scheduler is attached.
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

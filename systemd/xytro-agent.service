@@ -1,0 +1,16 @@
+[Unit]
+Description=xytro-agent autonomous scheduler brain (observe-reason-steer)
+Documentation=https://github.com/xytrolabs/xytro-sched
+After=xytro-sched.service
+Requires=xytro-sched.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/raf/Desktop/Linux-Xytro/agent/xytro_agent.py --seconds 20 --live --ab --daemon --interval 120
+Restart=on-failure
+RestartSec=10
+# The agent never runs hot; keep it off the fast lane of its own scheduler.
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

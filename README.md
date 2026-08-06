@@ -67,6 +67,29 @@ python3 agent/xytro_lifecycle.py watch --seconds 30 --phase constrained --live
 
 Requires a kernel with `CONFIG_SCHED_CLASS_EXT=y` and BTF (CachyOS, and any 6.12+ mainline distro kernel have it).
 
+## Auto-start on boot (systemd)
+
+Make xytro the default scheduler that boots with your machine, plus the autonomous agent as a daemon:
+
+```sh
+sudo bash systemd/install.sh
+```
+
+This installs two units:
+
+- **`xytro-sched.service`** — attaches the scheduler at boot, hot-loads `train/policy6.bin`, sets the 1 ms slice, and restarts on failure. Detaching (falling back to CFS) on shutdown is automatic.
+- **`xytro-agent.service`** — runs the M3 agent as a daemon (observe → reason → steer → A/B → auto-rollback, every 2 minutes), so the policy continuously adapts to your workload with a built-in safety net.
+
+Control them like any service:
+
+```sh
+systemctl status xytro-sched xytro-agent
+sudo systemctl restart xytro-sched
+sudo systemctl disable --now xytro-agent xytro-sched   # back to stock CFS
+```
+
+The unit files use `/home/raf/Desktop/Linux-Xytro` — edit `systemd/*.service` / the `XYTRO_BASE` env if you installed the tree elsewhere.
+
 ## Safety model
 
 1. **Kernel** protects pid 1, kernel threads, and the loader.
