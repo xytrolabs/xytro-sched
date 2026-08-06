@@ -1,0 +1,29 @@
+# --- build artifacts ---
+bpf/vmlinux.h
+bpf/*.bpf.o
+bpf/*.skel.h
+bpf/xytro_sched
+tools/xytro-top
+tools/xytro-steer
+
+# --- vendored upstream clone (fetch separately) ---
+third_party/
+
+# --- huge telemetry traces / datasets (GBs, training data) ---
+train/*.jsonl
+train/*.csv
+# keep only the tiny learned default policy
+train/*.bin
+!train/policy6.bin
+
+# --- agent runtime state (per-machine / personal) ---
+agent/*.log
+agent/lists.json
+agent/frozen.json
+
+# --- python ---
+__pycache__/
+*.pyc
+
+# --- misc ---
+nohup.out

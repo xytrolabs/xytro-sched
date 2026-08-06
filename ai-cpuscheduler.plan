@@ -1,0 +1,20 @@
+The goal is to have a small AI model manage the CPU Scheduler instead of binary management.
+
+# Adding the AI into the Linux Kernel
+We will have to create a small AI model with a Chain Of Thought so it can properly reason with itself on how to manage processes.
+it has to have real reasoning, but output tokens to trigger actions. The model needs to be very light and fast, with "subagents"
+# Preposed tokens
+    <kill> : Kills a process, requiring approval (Pushes a notification with reasoning created by `<task> $reason &kill` beforehand.)
+    <start>: Starts a process, requiring approval (Pushes a notification with reasoning created by `<task> $reason &start` beforehand.)
+    <freeze>: Stops a process; essentially pauses it, but <unfreeze> can revert the process back to its unfrozen state. Approval not required, but notification is pushed.
+    <task>$: Creates a subtask for another smaller model to manage. $token for tasks.
+        $reason&: Task for reasoning, &token used for type.
+            &kill: provides a reasoning for killing a process
+            &freeze: provides a reasoning for why a process was frozen
+            &start: provides a reasoning for why a process should be started.
+        $shell: Allows for a shell command to be executed.
+    <priority>$: Changes a task's priority
+        $lower: lowers a process's priority by one level
+        $raise: raises a process's priority by one level
+        $max  : Makes a process take top priority
+        $min  : Makes a process take lowest priority

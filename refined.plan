@@ -1,0 +1,176 @@
+# Xytro — Completely AI-Managed CPU Scheduler
+
+> Goal: an AI agent **autonomously operates the CPU scheduler end-to-end** — deciding task selection, CPU placement, time slices, and preemption (the actual scheduling), *plus* process lifecycle (kill/start/freeze/priority). It observes, decides, acts, measures, and adapts — with hard safety guarantees and full audit.
+> Status: master plan (v2). Architecture: **sched_ext/BPF scheduler in-kernel** + **autonomous steering agent in userspace**. The AI owns the policy; the kernel enforces it safely.
+
+## 1. Vision & scope
+
+- The AI is the scheduler's brain: it sets *how* tasks are chosen and placed, *when* they're preempted, *how long* they run, and *which* processes live/die/freeze.
+- Two decision timescales (non-negotiable split):
+  - **Micro** (every enqueue/wakeup/tick — millions/sec): a tiny, fast, learned policy runs **in-kernel** via `sched_ext` BPF.
+  - **Macro** (100 ms–seconds): the autonomous agent steers the policy, adapts strategy, and manages lifecycle actions from userspace.
+- **Fail-safe is built-in**: if the BPF scheduler ever errors, the kernel falls back to the default CFS scheduler — the AI cannot hard-brick the box.
+- Out of scope: kernel training, LLM token generation in the per-event path, GPU-accelerated in-kernel inference.
+
+## 2. Architecture overview
+
+```mermaid
+flowchart TB
+    subgraph Kernel
+        BPF["xytro_sched (sched_ext BPF)\ntask selection · placement · slices · preemption · balance"]
+        MAPS["BPF maps\npolicy weights · strategy · control · stats · telemetry ring"]
+    end
+    subgraph Userspace
+        AGENT["xytro-agent (autonomous brain)"]
+        OBS["Observer: workload state, metrics"]
+        STEER["Steersman: tune policy / strategy, A/B, rollback"]
+        REASON["CoT reasoner + subagents"]
+        LIFE["Lifecycle manager: kill / start / freeze / priority"]
+        UI["Notification + approval UI"]
+        TRAIN["Train pipeline (offline): distill → .bin"]
+    end
+    BPF --> MAPS
+    MAPS --> OBS --> AGENT
+    AGENT --> STEER -->|hot-update weights/params| MAPS
+    AGENT --> REASON
+    AGENT --> LIFE --> UI
+    TRAIN -->|new policy weights| STEER
+```
+
+The agent steers the scheduler by **writing to BPF maps at runtime** (no recompile, no reload) — that hot-update channel is what makes the system *autonomous*: the AI retunes the live scheduler as the workload changes.
+
+## 3. In-kernel: `xytro_sched` (sched_ext BPF scheduler)
+
+### 3.1 What it controls (real scheduling decisions)
+- **Select/dispatch** — which runnable task runs next on a CPU (`ops.select_cpu`, `ops.dispatch`).
+- **Placement** — which CPU a task is placed on (`ops.select_cpu`).
+- **Time slice** — per-task `slice_ns` (how long before preemption) set at enqueue/dispatch.
+- **Wakeup preemption** — whether a woken task preempts the running one (`SCX_ENQ_PREEMPT`).
+- **Balance** — cross-CPU load balancing (`ops.balance`).
+
+### 3.2 Policy model (fast, per-event)
+- **Learned scoring function**: score(task) = Σ wᵢ·fᵢ in fixed-point int8/int16; dispatch highest score, slice derived from score. Fully tunable and verifier-friendly. The "AI" lives in the weights, which live in a BPF map.
+- **Upgrade path**: small int8 MLP (1–2 hidden layers, ~64 units) for scoring, distilled offline from training; forward pass in bounded loops, no floats.
+- Weights are read from a BPF map each decision → the userspace agent can **hot-swap the policy live**.
+- Hot path never sleeps, allocates, or loops unboundedly.
+
+### 3.3 Telemetry out
+- Per-task features (cpu-time delta, state, nice, policy, cgroup weight, ctx-switch rate, rss), decisions taken (who was picked/skipped, slice, preempt), latency samples (wakeup→run), per-CPU util. Delivered via BPF ring buffer + maps to the agent.
+
+### 3.4 Kernel safety properties
+- sched_ext **automatic fallback to CFS** on any error.
+- BPF **verifier** guarantees bounded loops, safe memory, no unsupported ops.
+- No FPU: fixed-point arithmetic only.
+
+## 4. Userspace: `xytro-agent` (the autonomous brain)
+
+### 4.1 Observer
+- Consumes telemetry; maintains workload model: phase detection (interactive / batch / RT / power-sensitive), per-task history, interference & latency outliers.
+
+### 4.2 Steersman (macro policy control — the "autonomy")
+- Selects **strategy** (e.g. interactive-first, throughput, low-power, RT-aware) by writing a strategy enum + parameters to maps.
+- Tunes scoring weights, slice policy, preemption aggressiveness.
+- **A/B evaluation**: runs a candidate policy alongside current; compares on the reward metric; **rolls back automatically** on regression.
+- Accepts hot model updates from the training pipeline.
+
+### 4.3 CoT reasoner + subagents
+- CoT LLM (userspace, llama.cpp/GGUF) at macro cadence: explains decisions, generates `$reason` text, decides strategy switches on ambiguous workload signals.
+- Subagent queue (the `<task>$` idea): `reason` (text), `probe` (allowlisted shell inspection), `classify` — each with token/time budgets, reporting back.
+
+### 4.4 Lifecycle manager (the original token protocol)
+- `KILL` / `START` / `FREEZE` / `UNFREEZE` / `PRIORITY` actions per §5; kill/start gated by approval; freeze/priority auto with notification.
+- Enforced in userspace via signals/`set_user_nice`/`exec`, validated by the safety gate.
+
+### 4.5 Reward / evaluation loop
+- `reward = f(interactivity latency, throughput, fairness, power via RAPL)` — the objective the agent optimizes. Metrics drive strategy selection, weight tuning, and rollback.
+
+## 5. Action protocol (formal schema)
+
+External DSL (reasoner output / logs) stays as the proposed tokens; internal execution uses structured actions. No text parsing in the kernel.
+
+| Plan token | Action (schema) | Runs in | Approval | Notes |
+|---|---|---|---|---|
+| `<kill>` | `KILL { pid/name, reason }` | userspace | required | reason generated by reasoner first |
+| `<start>` | `START { name/argv }` | userspace | required | delegated launcher |
+| `<freeze>` | `FREEZE { pid }` | userspace | auto | SIGSTOP, notify |
+| `<unfreeze>` | `UNFREEZE { pid }` | userspace | auto | SIGCONT, notify |
+| `<priority>$lower` | `PRIO { pid, -1 }` | userspace | auto | nice step, bounded |
+| `<priority>$raise` | `PRIO { pid, +1 }` | userspace | auto | |
+| `<priority>$max` | `PRIO { pid, max }` | userspace | required | RT → gated |
+| `<priority>$min` | `PRIO { pid, min }` | userspace | auto | nice 19 |
+| `<task>$reason&…` | `REASON { action, pid }` → text | userspace | — | CoT subagent |
+| `<task>$shell` | `SHELL { allowlisted cmd }` | userspace | required | sandbox + allowlist |
+
+Every action carries `pid`, `reason` (always), `ttl`, and `flags` (auto-approved? / dry-run?).
+
+## 6. Safety & autonomy phases
+
+### Phased autonomy (never unsupervised day one)
+1. **Advisory** — AI recommends; nothing executes automatically. Build trust on metrics.
+2. **Constrained** — auto within hard bounds: scheduling tuning + freeze/priority only; kill/start still approved; policy deltas clamped.
+3. **Full autonomy** — all actions auto within bounds, still audited, still rollback-able, still kill-switch-able.
+
+### Hard guarantees (all phases)
+- sched_ext fallback to CFS on error; BPF verifier safety.
+- **Protected tasks**: pid 1, kernel threads, the agent's own process, configurable `protect` list — never scheduled out, frozen, or killed.
+- **Can't starve the host**: agent runs `SCHED_IDLE` under a cgroup CPU cap; scheduler kthreads have floor priority.
+- **Dry-run default**; live requires explicit opt-in.
+- **Rate limits** on lifecycle actions; bounded priority deltas per cycle.
+- **Audit**: append-only log of every policy change, proposal, approval, and action.
+- **TOCTOU**: pids re-validated at action time.
+- **Rollback**: last-known-good policy restored automatically on reward regression.
+
+## 7. Training pipeline
+- `train/` (offline): collect telemetry traces (M0) → label with a rule-based supervisor or train via RL on the reward metric → **distill** into the tiny fast-policy net → quantize to int8 → export `.bin` weights.
+- The agent hot-loads new weights into the BPF map at runtime; no kernel rebuild for model updates.
+- Reasoner: pretrained small LLM (GGUF), optionally fine-tuned on action/reason pairs.
+
+## 8. Repository layout (Linux-Xytro)
+```
+Linux-Xytro/
+├── bpf/
+│   ├── xytro_sched.bpf.c      # sched_ext scheduler: ops + scoring policy
+│   ├── xytro_sched.c          # userspace loader / skel
+│   └── maps.h                 # shared BPF maps (policy, strategy, stats, ring)
+├── agent/
+│   ├── xytro-agent/           # autonomous brain: observer, steersman
+│   ├── reasoner/              # CoT model + subagent queue
+│   ├── lifecycle/             # kill/start/freeze/priority actions
+│   └── ui/                    # notifications + approval
+├── train/                     # traces, training, distillation, .bin export
+├── proto/                     # shared schemas (BPF maps ↔ agent)
+├── tools/                     # load script, systemd units, policy.yaml
+└── docs/
+```
+
+## 9. CachyOS integration
+
+CachyOS is the ideal target — **no kernel build is required**; its kernels already ship sched-ext compiled in.
+
+- **Use a sched-ext-capable variant:** default `linux-cachyos` (or `-bore` / `-eevdf` / `-lts` / `-server` / `-rc`). **Avoid `linux-cachyos-bmq` and `linux-cachyos-hardened`** — CachyOS documents that these do NOT support sched-ext.
+- **The scheduler is a runtime-loaded BPF object, not a kernel patch.** We write it as an `scx` scheduler (BPF core + Rust userspace, following upstream `sched-ext/scx` conventions) and package it in the `scx-scheds` style.
+- **Head-start — upstream `scx_forge` already exists:** an AI-oriented sched_ext scheduler + agent (`tools/scx_forge_agent`) that optimizes a workload/goal from a `spec.toml` config. Our plan is more ambitious (full autonomy + CoT reasoner + lifecycle tokens). **Decision at M0/M1:** build on `scx_forge` vs. fork/differentiate.
+- **Boot integration:** register with `scx_loader` (`/etc/scx_loader/config.toml`) so it can be set as the default scheduler at boot, and be switchable via `scxctl` / the CachyOS Kernel Manager GUI. Power-profile switching (`power-profiles-daemon`) can map to our strategy modes.
+- **Distribution:** ship as a PKGBUILD for the CachyOS repos, or upstream into `scx-scheds-git`.
+- **Validation tooling already available:** `cachyos-benchmarker` (full suite) + `schbench` (wakeup latency) for the M5 comparisons; community benchmark site for games.
+- If we ever want to change kernel *config* (not needed for v1), sources live at `CachyOS/linux` / `linux-cachyos`, and a custom `CONFIG_CACHY` knob could be added.
+
+## 10. Milestones
+- **M0 — Minimal `sched_ext` scheduler + telemetry:** `xytro_sched.bpf.c` that builds, loads, runs (even a pass-through policy), falls back safely; ring-buffer telemetry → `xytro-top` viewer. Proves the mechanism end-to-end. ✅ DONE (verified: builds, loads, CFS fallback on exit, live telemetry).
+- **M1 — Learnable policy + steering:** parametric scoring with weights in a BPF map; agent reads/writes them; `xytro-top` + CLI steersman; dry-run + audit + protected list. ✅ DONE (7-feature scored policy, `xytro-steer` hot-update verified live; wakeup-fast-lane rule + **kick-preempt** added → schbench 1ms: p90 7us / p99 161us vs CFS 97us/1606us, RPS 3259 vs 2927 — xytro beats CFS on every wakeup percentile + throughput).
+- **M2 — Data + training:** collect traces, train + distill fast policy, quantize, hot-load `.bin` into the map. A/B + rollback harness. ✅ DONE (873MB corpus, `--label tail` avoids wake_freq saturation, `policy6.bin` = general policy acc 80.5%; loaded live; schbench RPS 3062 vs CFS 2927).
+- **M3 — Autonomous agent:** observer + reward metrics (latency/throughput/power) + CoT reasoner + strategy selection + auto-steering with guardrails. ✅ DONE (`agent/xytro_agent.py`: observe→phase-detect→reason→steer→A/B→auto-rollback→audit; verified live: applied balanced delta, detected reward 0.631→0.599 regression, auto-rolled-back to policy6).
+- **M4 — Lifecycle autonomy:** token protocol, approval UI, subagents, full audit; phased autonomy (advisory → constrained → full). ✅ DONE (`agent/xytro_lifecycle.py`: `list`/`watch`/`freeze`/`unfreeze`/`prio`/`kill`/`start`; token rendering `<freeze>pid=…&reason=…&`; phases advisory/constrained/full; verified live — autonomous watch detected a 101% CPU hog, reasoned, froze it; kill SIGTERM→grace→SIGKILL fixed; prio raise correctly OS-blocked without root; hardened protection: shells/terminals + same-session never touched). **Approval UI + user lists ✅** (`agent/xytro_approval.py`): KILL/START gate on an interactive approval dialog — zenity 4-choice (Approve / Approve & allow always / Deny / Deny & protect always) + a notification-center popup for visibility (COSMIC does not render notification action buttons, hence zenity). Persistent `agent/lists.json`: `allow` (auto-approve) + `protect` (never touch), managed via `allow add|remove|list` / `protect …` CLI or from the dialog buttons. Verified: allow-list short-circuits the dialog (kill → ok, no prompt). Remaining (later): LLM subagents, `start` UX.
+- **M5 — Hardening + benchmarks:** stress/fuzz, KASAN/lockdep-style checks on BPF, compare vs CFS (interactivity, throughput, fairness, power), tune reward, systemd boot integration on Xytro.
+
+## 11. Risks & mitigations
+| Risk | Mitigation |
+|---|---|
+| AI scheduler worse than CFS | Reward-based A/B + automatic rollback to last-good policy (M2/M3) |
+| Per-event inference too slow in BPF | Fixed-point linear scoring first; tiny MLP only if it passes latency budget |
+| BPF verifier rejects the model | Keep model ≤1–2 layers; fall back to linear scoring |
+| Agent bugs destabilize scheduling | sched_ext CFS fallback; BPF verifier; cgroup/SCHED_IDLE caps |
+| Destructive lifecycle actions | Approval gates, protected list, dry-run default, TOCTOU recheck, audit |
+| Agent starves or kills itself | Protected list includes agent; floor priority; rate limits |
+| Floats unavailable in BPF | Fixed-point (int8/int16) quantization from the start |
+| Model overfits one workload | Diverse trace corpus, periodic retraining from production telemetry, A/B before promotion |
