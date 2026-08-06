@@ -56,6 +56,8 @@ One command to install (`sudo bash systemd/install.sh`), one to revert to stock 
 
 ## The scores — xytro vs CFS (i5-13400F, 16 threads)
 
+For the full test methodology, exact commands, and every measured number, see [`BENCHMARKS.md`](BENCHMARKS.md). Here is the summary:
+
 ### Wakeup latency (schbench) — the responsiveness test
 
 | Percentile | **xytro** | CFS | |

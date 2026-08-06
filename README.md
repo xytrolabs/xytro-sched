@@ -102,4 +102,4 @@ The unit files use `/home/raf/Desktop/Linux-Xytro` — edit `systemd/*.service` 
 
 See [`refined.plan`](refined.plan) for the full architecture: the scored fast/slow-lane policy model, the training pipeline, the reward-driven autonomous agent, the token-based lifecycle protocol, and the phased autonomy roadmap (advisory → constrained → full).
 
-For a plain-English account of what was built and the benchmark results vs CFS, see [`EXPLANATION.md`](EXPLANATION.md).
+For a plain-English account of what was built and the benchmark results vs CFS, see [`EXPLANATION.md`](EXPLANATION.md). For the full test methodology, commands, and every measured number, see [`BENCHMARKS.md`](BENCHMARKS.md).
