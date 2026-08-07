@@ -4,8 +4,7 @@ Turns the agent's real decisions into a fine-tuned **small language model**
 that acts as the macro-cadence reasoner — choosing a strategy and writing the
 `$reason` text — with a **Q3-quantized GGUF** for minimal memory/CPU footprint.
 
-Target: **Liquid Foundation Model LFM-1B** (fastest, ~1 GB at Q3, fits the
-RTX 4060 for QLoRA fine-tuning).
+Target: **Liquid Foundation Model, LFM2.5-350M** (0.4B) as the *minimal* choice, or **LFM2-1.2B** if you want more reliable format-following. Liquid's lineup goes all the way down to **230M** (plus task-specific "Liquid Nanos"), and there are **official GGUF releases** (e.g. `LiquidAI/LFM2.5-2.6B-GGUF`), so llama.cpp compatibility is a given and a Q3 GGUF may already exist on Hugging Face — check before converting.
 
 ## The four steps
 
@@ -15,12 +14,17 @@ sudo pacman -S llama.cpp python-llama-cpp   # llama-cli, llama-quantize, convert
 pip install datasets transformers peft bitsandbytes accelerate
 ```
 
-### 2. Download the base LFM
-LFM-1B is hosted by Liquid AI (Hugging Face). It has a permissive community
-license — fine for local use:
+### 2. Pick + download the base LFM
+Liquid AI hosts models on Hugging Face (`LiquidAI/`). Current lineup includes
+LFM2.5-**230M**, **350M**, **2.6B**, **8B-A1B**, plus task-specific **Liquid Nanos**
+(LFM2-350M-Extract, LFM2-1.2B-RAG, …). For a minimal reasoner, try
+**LFM2.5-350M**; for better format reliability, **LFM2-1.2B**.
+
 ```sh
 pip install huggingface_hub
-huggingface-cli download LiquidAI/LFM-1B --local-dir lfm-1b-base
+# either the raw model (to fine-tune), or an official GGUF if one exists at Q3:
+huggingface-cli download LiquidAI/LFM2.5-350M --local-dir lfm-base
+# GGUF variant (if present): huggingface-cli download LiquidAI/LFM2.5-350M-GGUF --local-dir lfm-gguf
 ```
 
 ### 3. Build the dataset + fine-tune (QLoRA)
