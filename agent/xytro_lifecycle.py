@@ -41,11 +41,11 @@ from xytro_approval import ask_approval, notify
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 AUDIT_DEFAULT = os.path.join(HERE, "lifecycle_audit.log")
-CONFIG_FILE = os.path.join(HERE, "xytro.xy")
+CONFIG_FILE = os.path.join(HERE, "xytro.xytro")
 
 CLK_TCK = os.sysconf("SC_CLK_TCK") or 100
 
-# ---- user configuration (agent/xytro.xy) --------------------------------
+# ---- user configuration (agent/xytro.xytro) ------------------------------
 # Sections: protect / lock-protect / allow / lock-allow. Entries are comm
 # names or pids. lock-* entries need --force to remove. The CORE protections
 # (PROTECT_COMMS, pid 1/2, xytro, shells/terminals) are hard-coded and can
@@ -96,7 +96,7 @@ def load_lists():
 def _config_text():
     prot = sorted(list(PERSIST_PROTECT_COMMS) +
                   [str(p) for p in PERSIST_PROTECT_PIDS])
-    return ("# xytro.xy - xytro-sched user configuration\n"
+    return ("# xytro.xytro - xytro-sched user configuration\n"
             "# Sections: protect / lock-protect / allow / lock-allow.\n"
             "# Entries: comma-separated comm names or pids. '#' starts a comment.\n"
             "# CORE protections (init, kernel, xytro, shells/terminals) are\n"
@@ -651,7 +651,7 @@ def cmd_watch(args, protect):
 
 
 def cmd_lists(args):
-    """Manage the persistent lists (agent/xytro.xy): protect / allow, with
+    """Manage the persistent lists (agent/xytro.xytro): protect / allow, with
     optional --lock (needs --force to remove). CORE entries are non-removable."""
     is_allow = args.cmd == "allow"
     locked = args.lock
@@ -700,12 +700,12 @@ def cmd_lists(args):
 
 
 def cmd_tui(args):
-    """Simple menu editor for agent/xytro.xy (needs an interactive terminal)."""
+    """Simple menu editor for agent/xytro.xytro (needs an interactive terminal)."""
     if not sys.stdin.isatty():
         print("TUI requires an interactive terminal (run in your own terminal).")
         return
     while True:
-        print("\n=== xytro.xy editor ===")
+        print("\n=== xytro.xytro editor ===")
         print(" 1) Show all lists")
         print(" 2) Add to protect")
         print(" 3) Add to allow")
@@ -822,7 +822,7 @@ def main():
     sp = sub.add_parser("lists", help="show all lists (core + user + locked)")
     add_common(sp)
 
-    sp = sub.add_parser("tui", help="interactive .xy editor")
+    sp = sub.add_parser("tui", help="interactive .xytro editor")
     add_common(sp)
 
     args = ap.parse_args()

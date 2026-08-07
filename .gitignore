@@ -20,7 +20,7 @@ train/*.bin
 agent/*.log
 agent/lists.json
 agent/frozen.json
-agent/xytro.xy
+agent/xytro.xytro
 
 # --- python ---
 __pycache__/
