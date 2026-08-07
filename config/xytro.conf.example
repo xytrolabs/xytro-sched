@@ -26,3 +26,7 @@ threshold = 11719753        # score above this gets the fast lane
 base_slice_ns = 1000000     # normal-lane slice (ns); boot default was 1 ms
 fast_slice_mult = 1000      # fast slice = base * mult / 1000
 dry_run = 0                 # 1 = log decisions but force the normal lane
+
+# --- agent learning (non-policy setting) ---
+explore_eps = 0.15          # exploration probability: 0=exploit-only (no
+                            # weight/strategy trials), 1=always explore

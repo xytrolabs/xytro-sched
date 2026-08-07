@@ -25,6 +25,7 @@ Guardrails (always):
 import argparse
 import json
 import os
+import random
 import signal
 import subprocess
 import sys
@@ -87,6 +88,14 @@ STRATEGIES = {
     "power": (1.2, 4_000_000, 2000),
 }
 
+# ---- weight exploration (keeps hunting for improvements) -------------------
+WEIGHT_NAMES = ["wakeup", "nice", "kthread", "util",
+                "wake_freq", "rqdepth", "bias"]
+WEIGHT_MIN = -100_000
+WEIGHT_MAX = 100_000
+WEIGHT_STEP = 1_000          # max |delta| per weight-exploration trial
+EXPLORE_EPS = 0.15           # default exploration probability (config overrides)
+
 
 def clamp(v, lo, hi):
     return max(lo, min(hi, v))
@@ -105,19 +114,27 @@ def get_policy():
     """Parse `xytro-steer get` into a dict of the fields we care about."""
     rc, out = run(["sudo", "-n", STEER, "get"])
     pol = {"threshold": None, "base_slice_ns": None,
-           "fast_slice_mult": None, "dry_run": None}
+           "fast_slice_mult": None, "dry_run": None, "weights": None}
     if rc != 0:
         return pol, out
+    w = []
     for line in out.splitlines():
-        s = line.strip()
-        if "interactive_threshold" in s:
-            pol["threshold"] = int(s.split()[-1])
-        elif "base_slice_ns" in s:
-            pol["base_slice_ns"] = int(s.split()[-1])
-        elif "fast_slice_mult" in s:
-            pol["fast_slice_mult"] = int(s.split()[-1])
-        elif "dry_run" in s:
-            pol["dry_run"] = int(s.split()[-1])
+        tok = line.strip().split()
+        if not tok:
+            continue
+        key, val = tok[0], tok[-1]
+        if key == "interactive_threshold":
+            pol["threshold"] = int(val)
+        elif key == "base_slice_ns":
+            pol["base_slice_ns"] = int(val)
+        elif key == "fast_slice_mult":
+            pol["fast_slice_mult"] = int(val)
+        elif key == "dry_run":
+            pol["dry_run"] = int(val)
+        elif len(tok) == 2 and key in WEIGHT_NAMES:
+            w.append(int(val))
+    if len(w) == len(WEIGHT_NAMES):
+        pol["weights"] = w
     return pol, out
 
 
@@ -149,14 +166,29 @@ def observe(seconds, sample=50):
     fd, path = tempfile.mkstemp(prefix="xytro_agent_", suffix=".jsonl")
     os.close(fd)
     try:
+        # start_new_session: keep `sudo` + its root xytro-top child in one
+        # process group. Killing only the sudo wrapper (SIGTERM via
+        # proc.terminate()) can leave the root telemetry reader alive and
+        # spinning (~33% CPU); killing the whole group always cleans it up.
         proc = subprocess.Popen(["sudo", "-n", TOP, "--json", path,
-                                 "--sample", str(sample)])
+                                 "--sample", str(sample)],
+                                start_new_session=True)
         time.sleep(seconds)
-        proc.terminate()
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            proc.kill()
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
         # The pinned ring buffer may contain STALE events buffered before we
         # attached (up to the ring capacity). Keep only events from the final
         # `seconds` window so metrics reflect the live observation.
@@ -332,6 +364,33 @@ def restore_known_good(pol):
         return False
 
 
+def _explore_eps(args):
+    """Exploration probability: xytro.conf explore_eps, else --eps."""
+    try:
+        import xytro_config          # agent/xytro_config.py
+        d = xytro_config.load_config()
+        e = float(d.get("explore_eps", args.eps))
+        if 0.0 <= e <= 1.0:
+            return e
+    except Exception:
+        pass
+    return args.eps
+
+
+def maybe_weight_trial(pol, eps):
+    """With probability `eps`, return a bounded weight perturbation trial
+    (idx, current, new); else None (use the usual strategy steer)."""
+    if pol.get("weights") is None or random.random() >= eps:
+        return None
+    idx = random.randrange(len(WEIGHT_NAMES))
+    cur = pol["weights"][idx]
+    step = random.randint(WEIGHT_STEP // 2, WEIGHT_STEP)
+    new = cur + (step if random.random() < 0.5 else -step)
+    if not (WEIGHT_MIN <= new <= WEIGHT_MAX):
+        return None
+    return idx, cur, new
+
+
 def run_once(args):
     """One observe -> reason -> steer -> A/B cycle. Returns True on success."""
     pol, pout = get_policy()
@@ -348,6 +407,58 @@ def run_once(args):
     phase = detect_phase(m0)
     strat, why = reason(m0, phase, pol, args.strategy)
     print(why)
+
+    # ---- exploration: hunt for improvements instead of only exploiting -----
+    # With probability `explore_eps` (xytro.conf explore_eps / --eps) either
+    # perturb one score weight (A/B'd, reverted on regression) or try a random
+    # alternate strategy (the usual A/B keeps/rolls it back).
+    exploring = args.live and args.ab
+    eps = _explore_eps(args)
+    trial = maybe_weight_trial(pol, eps) if exploring else None
+    if trial is not None:
+        idx, cur, new = trial
+        wname = WEIGHT_NAMES[idx]
+        print("== EXPLORE: weight[%s] %d -> %d (base reward %.3f) ==" %
+              (wname, cur, new, reward(m0)))
+        rc, out = run(["sudo", "-n", STEER, "set", str(idx), str(new)])
+        if rc != 0:
+            print("  weight set failed: %s" % out.strip()[:200])
+            return True
+        m1 = observe(args.seconds)
+        r0, r1 = reward(m0), reward(m1)
+        print("  reward before=%.3f after=%.3f" % (r0, r1))
+        audit_entry(args.audit,
+                    {"ts": time.time(), "phase": phase, "strategy": strat,
+                     "action": "explore_weight", "live": True,
+                     "metrics": {"dec": m1.dec,
+                                 "dec_per_s": round(m1.dec_per_s, 1),
+                                 "fast_ratio": round(m1.fast_ratio, 3),
+                                 "p50_us": m1.pct(0.50), "p90_us": m1.pct(0.90),
+                                 "p99_us": m1.pct(0.99)},
+                     "delta": {"weight": wname, "from": cur, "to": new},
+                     "reward": round(r1, 3),
+                     "note": "exploration weight trial"})
+        if r1 < r0 * (1 - AB_REGRESSION):
+            run(["sudo", "-n", STEER, "set", str(idx), str(cur)])
+            print("  REGRESSION -> reverted %s to %d" % (wname, cur))
+            audit_entry(args.audit,
+                        {"ts": time.time(), "event": "rollback",
+                         "kind": "weight", "weight": wname,
+                         "from": new, "to": cur,
+                         "reason": "reward %0.3f < %0.3f" % (r1, r0)})
+        else:
+            promote_known_good()
+            print("  EXPLORE OK -> keeping %s = %d" % (wname, new))
+        print("== cycle done (exploration); audit log: %s ==" % args.audit)
+        return True
+
+    if exploring and random.random() < eps:
+        alt = random.choice(list(STRATEGIES))
+        if alt != strat:
+            print("  (EXPLORE) trying alternate strategy %s (was %s)"
+                  % (alt, strat))
+            strat = alt
+
     action, delta, note = steer(pol, strat, args.live, args.audit)
 
     entry = {"ts": time.time(), "phase": phase, "strategy": strat,
@@ -389,6 +500,10 @@ def main():
                     help="apply steering (default: dry-run/advisory)")
     ap.add_argument("--ab", action="store_true",
                     help="A/B: measure after, auto-rollback on regression")
+    ap.add_argument("--eps", type=float, default=EXPLORE_EPS,
+                    help="exploration probability for weight/strategy trials "
+                         "(0=off; default %.2f; xytro.conf `explore_eps` "
+                         "overrides)" % EXPLORE_EPS)
     ap.add_argument("--audit", default=os.path.join(HERE, "audit.log"),
                     help="append-only audit log path")
     ap.add_argument("--daemon", action="store_true",
