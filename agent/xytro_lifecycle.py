@@ -41,44 +41,117 @@ from xytro_approval import ask_approval, notify
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 AUDIT_DEFAULT = os.path.join(HERE, "lifecycle_audit.log")
-LISTS_FILE = os.path.join(HERE, "lists.json")
+CONFIG_FILE = os.path.join(HERE, "xytro.xy")
 
 CLK_TCK = os.sysconf("SC_CLK_TCK") or 100
 
-# Persistent user-controlled lists (agent/lists.json). Entries are comm names
-# or stringified pids.
+# ---- user configuration (agent/xytro.xy) --------------------------------
+# Sections: protect / lock-protect / allow / lock-allow. Entries are comm
+# names or pids. lock-* entries need --force to remove. The CORE protections
+# (PROTECT_COMMS, pid 1/2, xytro, shells/terminals) are hard-coded and can
+# never be removed by the user.
 PERSIST_PROTECT_COMMS = set()
 PERSIST_PROTECT_PIDS = set()
+PERSIST_LOCK_PROTECT = set()     # comms or pids-as-strings; --force to remove
 PERSIST_ALLOW = set()
+PERSIST_LOCK_ALLOW = set()
+
+
+def _is_pid(e):
+    return e.lstrip("-").isdigit()
 
 
 def load_lists():
-    global PERSIST_PROTECT_COMMS, PERSIST_PROTECT_PIDS, PERSIST_ALLOW
+    global PERSIST_PROTECT_COMMS, PERSIST_PROTECT_PIDS, PERSIST_LOCK_PROTECT
+    global PERSIST_ALLOW, PERSIST_LOCK_ALLOW
+    PERSIST_PROTECT_COMMS, PERSIST_PROTECT_PIDS = set(), set()
+    PERSIST_LOCK_PROTECT, PERSIST_ALLOW, PERSIST_LOCK_ALLOW = set(), set(), set()
+    if not os.path.exists(CONFIG_FILE):
+        return
     try:
-        with open(LISTS_FILE) as f:
-            data = json.load(f)
-        PERSIST_PROTECT_COMMS = {str(e) for e in data.get("protect", [])
-                                 if not str(e).lstrip("-").isdigit()}
-        PERSIST_PROTECT_PIDS = {int(e) for e in data.get("protect", [])
-                                if str(e).lstrip("-").isdigit()}
-        PERSIST_ALLOW = {str(e) for e in data.get("allow", [])}
-    except (OSError, ValueError, json.JSONDecodeError):
-        PERSIST_PROTECT_COMMS = set()
-        PERSIST_PROTECT_PIDS = set()
-        PERSIST_ALLOW = set()
+        with open(CONFIG_FILE) as f:
+            for raw in f:
+                line = raw.split("#", 1)[0].strip()
+                if not line or ":" not in line:
+                    continue
+                key, _, val = line.partition(":")
+                entries = [e.strip() for e in val.split(",") if e.strip()]
+                k = key.strip().lower()
+                if k == "protect":
+                    for e in entries:
+                        if _is_pid(e):
+                            PERSIST_PROTECT_PIDS.add(int(e))
+                        else:
+                            PERSIST_PROTECT_COMMS.add(e)
+                elif k == "lock-protect":
+                    PERSIST_LOCK_PROTECT.update(entries)
+                elif k == "allow":
+                    PERSIST_ALLOW.update(entries)
+                elif k == "lock-allow":
+                    PERSIST_LOCK_ALLOW.update(entries)
+    except OSError:
+        pass
+
+
+def _config_text():
+    prot = sorted(list(PERSIST_PROTECT_COMMS) +
+                  [str(p) for p in PERSIST_PROTECT_PIDS])
+    return ("# xytro.xy - xytro-sched user configuration\n"
+            "# Sections: protect / lock-protect / allow / lock-allow.\n"
+            "# Entries: comma-separated comm names or pids. '#' starts a comment.\n"
+            "# CORE protections (init, kernel, xytro, shells/terminals) are\n"
+            "# hard-coded and can never be removed; lock-* entries need --force.\n"
+            "\n"
+            "protect: " + ", ".join(prot) + "\n"
+            "lock-protect: " + ", ".join(sorted(PERSIST_LOCK_PROTECT)) + "\n"
+            "allow: " + ", ".join(sorted(PERSIST_ALLOW)) + "\n"
+            "lock-allow: " + ", ".join(sorted(PERSIST_LOCK_ALLOW)) + "\n")
 
 
 def save_lists():
-    data = {"allow": sorted(PERSIST_ALLOW),
-            "protect": sorted([str(p) for p in PERSIST_PROTECT_PIDS] +
-                               list(PERSIST_PROTECT_COMMS))}
-    with open(LISTS_FILE, "w") as f:
-        json.dump(data, f, indent=2)
+    try:
+        with open(CONFIG_FILE, "w") as f:
+            f.write(_config_text())
+    except OSError as e:
+        print("warning: could not write %s (%s)" % (CONFIG_FILE, e))
 
 
 def is_allowed(proc):
-    """True if the target is on the user's allow list (auto-approve)."""
-    return (proc.comm in PERSIST_ALLOW or str(proc.pid) in PERSIST_ALLOW)
+    """True if the target is auto-approved (allow or lock-allow)."""
+    return (proc.comm in PERSIST_ALLOW or str(proc.pid) in PERSIST_ALLOW or
+            proc.comm in PERSIST_LOCK_ALLOW or str(proc.pid) in PERSIST_LOCK_ALLOW)
+
+
+def is_protected(proc, protect):
+    """True if the target must never be acted on (core + user + locked)."""
+    if proc is None:
+        return True
+    if proc.pid in protect:                       # pid 1/2, --protect, xytro loader
+        return True
+    if proc.comm in PROTECT_COMMS or proc.comm in PERSIST_PROTECT_COMMS:
+        return True
+    if proc.pid in PERSIST_PROTECT_PIDS:
+        return True
+    if proc.comm in PERSIST_LOCK_PROTECT or str(proc.pid) in PERSIST_LOCK_PROTECT:
+        return True
+    return False
+
+
+def show_lists():
+    print("=== xytro lists ===")
+    print("\n[CORE]  hard-coded, can never be removed:")
+    print("  " + (", ".join(sorted(PROTECT_COMMS)) or "(none)"))
+    print("\n[protect]  never touched (user):")
+    prot = sorted(list(PERSIST_PROTECT_COMMS) +
+                  [str(p) for p in PERSIST_PROTECT_PIDS])
+    print("  " + (", ".join(prot) or "(empty)"))
+    print("\n[lock-protect]  never touched, --force to remove:")
+    print("  " + (", ".join(sorted(PERSIST_LOCK_PROTECT)) or "(empty)"))
+    print("\n[allow]  auto-approve kill/start (user):")
+    print("  " + (", ".join(sorted(PERSIST_ALLOW)) or "(empty)"))
+    print("\n[lock-allow]  auto-approve, --force to remove:")
+    print("  " + (", ".join(sorted(PERSIST_LOCK_ALLOW)) or "(empty)"))
+    print("\nConfig file: %s" % CONFIG_FILE)
 
 
 def is_descendant(pid, root):
@@ -298,9 +371,7 @@ def scan(args, protect):
             same_sess = os.getsid(pid) == my_sid
         except (OSError, ValueError):
             pass
-        p.protected = (pid in protect or p.comm in PROTECT_COMMS
-                       or p.comm in PERSIST_PROTECT_COMMS
-                       or pid in PERSIST_PROTECT_PIDS or same_sess
+        p.protected = (is_protected(p, protect) or same_sess
                        or is_descendant(pid, os.getpid()))
         out.append(p)
     out.sort(key=lambda p: -p.cpu)
@@ -411,7 +482,7 @@ def notify_outcome(action, proc, status, extra=""):
 def do_action(action, proc, reason, args, protect, audit):
     """Execute (or dry-run) one action with full guardrails. Returns status."""
     auto = False
-    if proc is None or proc.pid in protect or proc.protected:
+    if is_protected(proc, protect) or proc.protected:
         notify_outcome(action, proc, "blocked:protected")
         return "blocked:protected"
     if action in ("kill", "start"):
@@ -580,38 +651,113 @@ def cmd_watch(args, protect):
 
 
 def cmd_lists(args):
-    """Manage the persistent allow / protect lists (agent/lists.json)."""
-    which = PERSIST_ALLOW if args.cmd == "allow" else PERSIST_PROTECT_COMMS
-    which_pids = None if args.cmd == "allow" else PERSIST_PROTECT_PIDS
+    """Manage the persistent lists (agent/xytro.xy): protect / allow, with
+    optional --lock (needs --force to remove). CORE entries are non-removable."""
+    is_allow = args.cmd == "allow"
+    locked = args.lock
     if args.op == "list":
-        entries = sorted(which) + (sorted(str(p) for p in which_pids)
-                                   if which_pids is not None else [])
-        print("%s list (%s):" % (args.cmd, LISTS_FILE))
-        for e in entries or ["(empty)"]:
-            print("  " + e)
+        show_lists()
         return
-    if not args.entry:
+    e = args.entry
+    if not e:
         print("ERROR: %s %s needs an entry (comm or pid)" % (args.cmd, args.op))
         sys.exit(1)
-    e = args.entry
     if args.op == "add":
-        if args.cmd == "allow":
-            PERSIST_ALLOW.add(e)
-        elif e.lstrip("-").isdigit():
-            which_pids.add(int(e))
+        if is_allow:
+            (PERSIST_LOCK_ALLOW if locked else PERSIST_ALLOW).add(e)
+        elif _is_pid(e):
+            if locked:
+                PERSIST_LOCK_PROTECT.add(e)
+            else:
+                PERSIST_PROTECT_PIDS.add(int(e))
         else:
-            which.add(e)
+            (PERSIST_LOCK_PROTECT if locked else PERSIST_PROTECT_COMMS).add(e)
         save_lists()
-        print("%s added to %s list" % (e, args.cmd))
-    else:  # remove
-        if args.cmd == "allow":
-            PERSIST_ALLOW.discard(e)
-        else:
-            which.discard(e)
-            if e.lstrip("-").isdigit():
-                which_pids.discard(int(e))
-        save_lists()
-        print("%s removed from %s list" % (e, args.cmd))
+        print("%s added to %s %s list" % (e, "locked " if locked else "",
+                                           args.cmd))
+        return
+    # remove
+    if not is_allow and e in PROTECT_COMMS:
+        print("REFUSED: %s is a CORE protection and cannot be removed" % e)
+        return
+    if is_allow:
+        if e in PERSIST_LOCK_ALLOW and not args.force:
+            print("REFUSED: %s is locked; use --force to remove" % e)
+            return
+        PERSIST_ALLOW.discard(e)
+        PERSIST_LOCK_ALLOW.discard(e)
+    else:
+        if e in PERSIST_LOCK_PROTECT and not args.force:
+            print("REFUSED: %s is locked; use --force to remove" % e)
+            return
+        PERSIST_PROTECT_COMMS.discard(e)
+        PERSIST_LOCK_PROTECT.discard(e)
+        if _is_pid(e):
+            PERSIST_PROTECT_PIDS.discard(int(e))
+            PERSIST_LOCK_PROTECT.discard(e)
+    save_lists()
+    print("%s removed from %s list" % (e, args.cmd))
+
+
+def cmd_tui(args):
+    """Simple menu editor for agent/xytro.xy (needs an interactive terminal)."""
+    if not sys.stdin.isatty():
+        print("TUI requires an interactive terminal (run in your own terminal).")
+        return
+    while True:
+        print("\n=== xytro.xy editor ===")
+        print(" 1) Show all lists")
+        print(" 2) Add to protect")
+        print(" 3) Add to allow")
+        print(" 4) Lock-protect an entry")
+        print(" 5) Lock-allow an entry")
+        print(" 6) Remove an entry")
+        print(" 7) Quit")
+        try:
+            ch = (input("> ") or "").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        if ch == "1":
+            show_lists()
+        elif ch in ("2", "3", "4", "5"):
+            target = input("  comm or pid: ").strip()
+            if not target:
+                continue
+            if ch == "2":
+                (PERSIST_PROTECT_PIDS.add(int(target)) if _is_pid(target)
+                 else PERSIST_PROTECT_COMMS.add(target))
+            elif ch == "3":
+                PERSIST_ALLOW.add(target)
+            elif ch == "4":
+                PERSIST_LOCK_PROTECT.add(target)
+            else:
+                PERSIST_LOCK_ALLOW.add(target)
+            save_lists()
+            print("  added %s" % target)
+        elif ch == "6":
+            target = input("  comm or pid: ").strip()
+            if not target:
+                continue
+            if target in PROTECT_COMMS:
+                print("  REFUSED: %s is CORE and cannot be removed" % target)
+                continue
+            if (target in PERSIST_LOCK_PROTECT or
+                    target in PERSIST_LOCK_ALLOW):
+                ok = input("  %s is locked; remove anyway (y/N): "
+                           % target).strip().lower() in ("y", "yes")
+                if not ok:
+                    continue
+            if _is_pid(target):
+                PERSIST_PROTECT_PIDS.discard(int(target))
+            PERSIST_PROTECT_COMMS.discard(target)
+            PERSIST_LOCK_PROTECT.discard(target)
+            PERSIST_ALLOW.discard(target)
+            PERSIST_LOCK_ALLOW.discard(target)
+            save_lists()
+            print("  removed %s" % target)
+        elif ch == "7":
+            return
 
 
 def main():
@@ -660,12 +806,24 @@ def main():
     sp.add_argument("cmd", nargs=argparse.REMAINDER)
     sp.add_argument("--reason", default="manual start")
 
-    # persistent user lists: allow (auto-approve) / protect (never touch)
+    # persistent user lists: allow (auto-approve) / protect (never touch).
+    # --lock adds to the locked section (needs --force to remove); CORE
+    # protections can never be removed.
     for name in ("allow", "protect"):
         s2 = sub.add_parser(name)
         s2.add_argument("op", choices=["add", "remove", "list"])
         s2.add_argument("entry", nargs="?", help="comm name or pid")
+        s2.add_argument("--lock", action="store_true",
+                        help="add to the locked section (needs --force to remove)")
+        s2.add_argument("--force", action="store_true",
+                        help="remove a locked entry")
         s2.add_argument("--audit", default=AUDIT_DEFAULT)
+
+    sp = sub.add_parser("lists", help="show all lists (core + user + locked)")
+    add_common(sp)
+
+    sp = sub.add_parser("tui", help="interactive .xy editor")
+    add_common(sp)
 
     args = ap.parse_args()
     self_pid = os.getpid()
@@ -673,6 +831,12 @@ def main():
 
     if args.cmd in ("allow", "protect"):
         return cmd_lists(args)
+    if args.cmd == "lists":
+        show_lists()
+        return
+    if args.cmd == "tui":
+        cmd_tui(args)
+        return
 
     if args.cmd == "list":
         cmd_list(args, protect)
@@ -687,7 +851,7 @@ def main():
     if proc is None:
         print("ERROR: pid %d not found" % args.pid)
         sys.exit(1)
-    proc.protected = args.pid in protect or proc.comm in PROTECT_COMMS
+    proc.protected = is_protected(proc, protect)
     if args.cmd == "prio":
         d = args.delta
         if d == 99:

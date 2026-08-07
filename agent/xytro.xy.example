@@ -1,0 +1,21 @@
+# xytro.xy - xytro-sched user configuration
+# Copy to agent/xytro.xy (per-machine; gitignored). Edit by hand or via:
+#   python3 agent/xytro_lifecycle.py tui
+#   python3 agent/xytro_lifecycle.py protect add|remove <name> [--lock] [--force]
+#   python3 agent/xytro_lifecycle.py allow  add|remove <name> [--lock] [--force]
+#   python3 agent/xytro_lifecycle.py lists
+#
+# Sections (comma-separated comm names or pids; '#' starts a comment):
+#   protect      - the lifecycle agent NEVER freezes/prios/kills these (user)
+#   lock-protect - same, but can only be removed with --force
+#   allow        - kill/start on these is auto-approved (no dialog)
+#   lock-allow   - same, but can only be removed with --force
+#
+# CORE protections (init, kernel threads, xytro's own processes, your
+# shells/terminals, DE) are hard-coded in xytro_lifecycle.py and can NEVER be
+# removed, even with --force.
+
+protect:
+lock-protect:
+allow:
+lock-allow:
