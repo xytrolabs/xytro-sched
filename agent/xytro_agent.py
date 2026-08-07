@@ -227,6 +227,7 @@ def reason(m, phase, pol, strategy):
         pol["threshold"], pol["base_slice_ns"], pol["fast_slice_mult"],
         pol["dry_run"]))
     lines.append("INFER: phase=%s" % phase)
+    strat = "balanced"  # safe default so every path yields a valid strategy
     if phase == "insufficient-data":
         lines.append("DECIDE: hold policy, need more signal "
                      "(<%d decisions seen)" % MIN_DECISIONS)
@@ -361,8 +362,11 @@ def steer(pol, strat, live, audit):
 def audit_entry(audit, entry):
     if not audit:
         return
-    with open(audit, "a") as f:
-        f.write(json.dumps(entry) + "\n")
+    try:
+        with open(audit, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+    except OSError as e:
+        print("warning: audit write failed (%s)" % e)
 
 
 def run_once(args):
@@ -440,6 +444,16 @@ def main():
     ap.add_argument("--interval", type=int, default=120,
                     help="seconds between daemon cycles")
     args = ap.parse_args()
+
+    # Share the audit log between the root service and the user's own runs:
+    # it's append-only, so when running as root chown it to root:<repo group>
+    # mode 664 to let both root and the user append (and the user read it).
+    if os.geteuid() == 0 and args.audit and os.path.exists(args.audit):
+        try:
+            os.chown(args.audit, 0, os.stat(HERE).st_gid)
+            os.chmod(args.audit, 0o664)
+        except OSError:
+            pass
 
     if args.daemon:
         print("== xytro-agent daemon: %ds observe every %ds (live=%s ab=%s) =="

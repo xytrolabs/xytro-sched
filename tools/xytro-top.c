@@ -11,6 +11,7 @@
  *   sudo ./tools/xytro-top --json out.jsonl write a JSONL trace (training)
  */
 #include <errno.h>
+#include <fcntl.h>
 #include <linux/types.h>
 #include <signal.h>
 #include <stdio.h>
@@ -232,10 +233,18 @@ int main(int argc, char **argv)
 		if (!strcmp(argv[i], "--raw")) {
 			mode = MODE_RAW;
 		} else if (!strcmp(argv[i], "--json") && i + 1 < argc) {
+			const char *jpath = argv[++i];
+			int ofd;
 			mode = MODE_JSON;
-			json_out = fopen(argv[++i], "w");
+			/* Open existing outputs WITHOUT O_CREAT: with fs.protected_regular
+			 * set, O_CREAT on another user's file in sticky /tmp is denied
+			 * (even for root). Fall back to O_CREAT only for brand-new files. */
+			ofd = open(jpath, O_WRONLY | O_TRUNC);
+			if (ofd < 0 && errno == ENOENT)
+				ofd = open(jpath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+			json_out = ofd >= 0 ? fdopen(ofd, "w") : NULL;
 			if (!json_out) {
-				fprintf(stderr, "cannot open %s: %s\n", argv[i],
+				fprintf(stderr, "cannot open %s: %s\n", jpath,
 					strerror(errno));
 				return 1;
 			}
@@ -286,6 +295,16 @@ int main(int argc, char **argv)
 	signal(SIGTERM, on_signal);
 
 	while (!stop_req) {
+		/* Non-blocking drain FIRST: ring_buffer__poll alone can't see a
+		 * full ring when the producer is dropping (full ring -> reserve
+		 * fails -> no wakeup), so a consumer can sit on stale/full data
+		 * forever and all new telemetry silently vanishes. Consume drains
+		 * everything available regardless of wakeups. */
+		err = ring_buffer__consume(rb);
+		if (err < 0 && err != -EINTR) {
+			fprintf(stderr, "ring buffer consume failed: %d\n", err);
+			break;
+		}
 		err = ring_buffer__poll(rb, 200);
 		if (err < 0 && err != -EINTR) {
 			fprintf(stderr, "ring buffer poll failed: %d\n", err);
