@@ -7,10 +7,11 @@ best strategy (CoT-style, human-readable), and (optionally, --live) steers the
 policy within hard guardrails. Dry-run (advisory) is the DEFAULT: it observes,
 reasons, and RECOMMENDS without touching the policy map.
 
-Usage (run while xytro_sched --no-drain is attached):
-  sudo python3 agent/xytro_agent.py --seconds 30              # advisory
-  sudo python3 agent/xytro_agent.py --seconds 30 --live       # constrained steering
-  sudo python3 agent/xytro_agent.py --seconds 20 --ab         # A/B + auto-rollback
+Usage (run while xytro_sched --no-drain is attached; needs the passwordless
+sudoers drop-in for the steer/top tools, installed by systemd/install.sh):
+  python3 agent/xytro_agent.py --seconds 30              # advisory
+  python3 agent/xytro_agent.py --seconds 30 --live       # constrained steering
+  python3 agent/xytro_agent.py --seconds 20 --ab         # A/B + auto-rollback
 
 Guardrails (always):
   - dry-run unless --live
@@ -38,6 +39,26 @@ STEER = os.path.join(ROOT, "tools", "xytro-steer")
 # ---- guardrail bounds -----------------------------------------------------
 THRESHOLD_MIN = 50_000          # 0.05M
 THRESHOLD_MAX = 50_000_000      # 50M
+_BASE_FALLBACK = 11_719_753     # policy6.bin trained threshold (steering baseline)
+
+
+def _load_threshold_base():
+    """Baseline threshold from the trained policy file (fallback: policy6's)."""
+    try:
+        import struct
+        p = os.path.join(ROOT, "train", "policy6.bin")
+        if os.path.exists(p):
+            with open(p, "rb") as f:
+                f.seek(-16, os.SEEK_END)
+                thr, _b, _m, _d = struct.unpack("<iiiI", f.read(16))
+                if 0 < thr <= THRESHOLD_MAX:
+                    return thr
+    except Exception:
+        pass
+    return _BASE_FALLBACK
+
+
+THRESHOLD_BASE = _load_threshold_base()
 BASE_MIN = 250_000              # 0.25 ms
 BASE_MAX = 8_000_000            # 8 ms
 MULT_MIN = 500
@@ -317,10 +338,11 @@ def reward(m):
 def steer(pol, strat, live, audit):
     """Compute and (if live) apply the policy delta within guardrails."""
     tf, base, mult = STRATEGIES[strat]
-    if pol["threshold"] is None:
-        new_thr = THRESHOLD_MIN
-    else:
-        new_thr = int(clamp(pol["threshold"] * tf, THRESHOLD_MIN, THRESHOLD_MAX))
+    # Target an ABSOLUTE baseline (the trained policy threshold) scaled by the
+    # strategy factor — NOT the current threshold. The old "current * factor"
+    # ratcheted the bar down to the safety floor over many cycles (threshold
+    # got stuck at 50k). Baseline follows the loaded policy file automatically.
+    new_thr = int(clamp(THRESHOLD_BASE * tf, THRESHOLD_MIN, THRESHOLD_MAX))
     new_base = int(clamp(base, BASE_MIN, BASE_MAX))
     new_mult = int(clamp(mult, MULT_MIN, MULT_MAX))
 

@@ -40,7 +40,9 @@ QLoRA fine-tune `LiquidAI/LFM2.5-230M` on that JSONL with `transformers` +
 
 ### 4. Plug into the agent
 ```sh
-sudo python3 agent/xytro_agent.py --seconds 20 --live --ab --llm /home/raf/lfm/LFM2.5-230M-Q4_0.gguf
+# needs the passwordless sudoers drop-in (systemd/install.sh) so the internal
+# steer/top calls don't prompt; then no sudo is required here either:
+python3 agent/xytro_agent.py --seconds 20 --live --ab --llm /home/raf/lfm/LFM2.5-230M-Q4_0.gguf
 ```
 
 ### 4b. Quantize further (only after fine-tuning)

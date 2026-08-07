@@ -1,0 +1,10 @@
+# xytro-sched — passwordless root for the scheduler agent's tooling so the
+# agent + lifecycle can run autonomously (and you can run them manually)
+# without interactive sudo password prompts.
+#
+# Covers exactly the commands the tools shell out to:
+#   - xytro-steer / xytro-top : read/write the live BPF policy maps
+#   - renice / kill           : lifecycle hog actions on foreign processes
+# Only these binaries gain NOPASSWD; a plain `sudo <anything else>` still
+# prompts for the password.
+raf ALL=(root) NOPASSWD: /home/raf/Desktop/Linux-Xytro/tools/xytro-steer, /home/raf/Desktop/Linux-Xytro/tools/xytro-top, /usr/bin/renice, /usr/bin/kill

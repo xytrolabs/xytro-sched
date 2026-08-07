@@ -24,6 +24,10 @@ cp "$BASE/systemd/xytro-sched.service" "$UNITDIR/"
 cp "$BASE/systemd/xytro-agent.service" "$UNITDIR/"
 systemctl daemon-reload
 
+echo "== installing passwordless sudoers drop-in (agent tools) =="
+install -m 440 -o root -g root "$BASE/systemd/sudoers.xytro" /etc/sudoers.d/xytro
+visudo -cf /etc/sudoers.d/xytro || { echo "sudoers syntax ERROR — aborting"; exit 1; }
+
 echo "== enabling + starting =="
 systemctl enable --now xytro-sched.service
 systemctl enable --now xytro-agent.service

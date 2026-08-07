@@ -476,22 +476,36 @@ def do_action(action, proc, reason, args, protect, audit):
         if delta is None:
             delta = 5           # deprioritize hogs (raise nice, no root needed)
         target = clamp_nice(proc.nice + delta)
-        rc = subprocess.run(["renice", "-n", str(target), "-p", str(proc.pid)],
-                            capture_output=True, text=True)
+        # renice of a foreign process needs root; use passwordless sudo when
+        # not already root (sudoers drop-in from systemd/install.sh).
+        cmd = ["renice", "-n", str(target), "-p", str(proc.pid)]
+        if os.geteuid() != 0:
+            cmd = ["sudo", "-n"] + cmd
+        rc = subprocess.run(cmd, capture_output=True, text=True)
         status = "ok" if rc.returncode == 0 else "err:" + rc.stderr.strip()
     elif action == "kill":
         # SIGTERM first, then grace; only SIGKILL if it survived. If it is
         # already gone after the grace period, the SIGTERM did its job.
+        # Killing a foreign process needs root; use passwordless sudo when
+        # not already root (sudoers drop-in from systemd/install.sh).
+
+        def sig(pid, sig):
+            if os.geteuid() == 0:
+                os.kill(pid, sig)
+            else:
+                subprocess.run(["sudo", "-n", "/usr/bin/kill", "-%d" % sig,
+                                str(pid)], check=True, capture_output=True)
+
         try:
-            os.kill(proc.pid, signal.SIGTERM)
-        except OSError as e:
+            sig(proc.pid, signal.SIGTERM)
+        except Exception as e:
             status = "err:%s" % e
         else:
             time.sleep(KILL_GRACE)
             if read_proc(proc.pid) is not None:
                 try:
-                    os.kill(proc.pid, signal.SIGKILL)
-                except OSError as e:
+                    sig(proc.pid, signal.SIGKILL)
+                except Exception as e:
                     status = "err:%s" % e
             else:
                 status = "ok"
