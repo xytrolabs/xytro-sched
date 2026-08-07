@@ -7,7 +7,10 @@
 #
 # Manage with:  python3 agent/xytro_config.py validate|apply|promote|restore|status
 # The boot service auto-applies this file and auto-restores the last known
-# working config if something breaks (kernel watchdog stall, bad values).
+# working config if something breaks (kernel watchdog stall, bad values). If it
+# keeps breaking, the boot wrapper walks a recovery ladder - last-known-good ->
+# built-in defaults -> defaults+dry-run - so xytro always re-attaches and never
+# parks on stock CFS.
 
 # --- optional learned-policy base (a 44-byte .bin relative to the repo) ---
 policy = train/policy6.bin

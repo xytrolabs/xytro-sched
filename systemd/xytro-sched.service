@@ -12,15 +12,11 @@ Environment=XYTRO_BASE=/home/raf/Desktop/Linux-Xytro
 # service runs as root, so ~ would be /root - pin it explicitly).
 Environment=XYTRO_CONFIG_DIR=/home/raf/.config/xytro
 # Always restart: even a clean exit (e.g. the kernel watchdog disabling us on a
-# stall) should bring the scheduler back automatically.
+# stall) should bring the scheduler back automatically. We never park on stock
+# CFS: every restart the boot wrapper walks a recovery ladder (last-known-good
+# -> built-in defaults -> defaults+dry-run) so xytro always re-attaches.
 Restart=always
 RestartSec=5
-# Crash-loop guard: if the scheduler stalls and is disabled repeatedly (kernel
-# watchdog), give up after 6 restarts in 5 minutes instead of hammering the
-# system forever. The unit then goes to 'failed' and the system runs on stock
-# CFS - fix the config and `systemctl reset-failed xytro-sched` to retry.
-StartLimitIntervalSec=300
-StartLimitBurst=6
 # The scheduler must never be OOM-killed silently; stop the unit if it is.
 OOMPolicy=stop
 # Keep the service alive as long as the kernel scheduler is attached.

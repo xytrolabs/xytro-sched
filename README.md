@@ -108,9 +108,13 @@ Values override the `policy` .bin (or built-in defaults) and are applied atomica
 
 **Last-known-good restore** — the config dir also keeps `known_good.bin` + `known_good.conf` + `history.jsonl` + `state.json`:
 
-- `apply` is **provisional**: it first snapshots the current live policy as known-good, then loads your config. If the new config later stalls the scheduler, the boot wrapper auto-restores the known-good config.
+- `apply` is **provisional**: it first snapshots the current live policy as known-good, then loads your config. If the new config later stalls the scheduler, the boot wrapper walks a **recovery ladder** that always re-attaches xytro — it **never parks on stock CFS**:
+  1. **last-known-good** config (and `xytro.conf` is reverted to match),
+  2. built-in **safe defaults** (`steer reset`),
+  3. defaults **+ dry-run** (normal lane only — xytro attached but inert).
+  A clean run on the next boot clears the counter so the full config is tried again.
 - `promote` (or the agent, after a clean A/B cycle) marks the current policy as last-known-good.
-- On a **kernel-watchdog stall**, the loader exits non-zero, and on restart the boot wrapper loads the last-known-good config instead of re-applying the one that broke — and reverts `xytro.conf` to match. Bad values in the file are rejected without touching the live policy.
+- On a **kernel-watchdog stall**, the loader exits non-zero, and on restart the boot wrapper walks the ladder instead of re-applying the one that broke. Bad values in the file are rejected without touching the live policy.
 
 
 ## Auto-start on boot (systemd)
@@ -123,7 +127,7 @@ sudo bash systemd/install.sh
 
 This installs two units:
 
-- **`xytro-sched.service`** — attaches the scheduler at boot, applies `~/.config/xytro/xytro.conf` (or falls back to `train/policy6.bin` + the 1 ms slice), restarts on failure, and **auto-restores the last-known-good config** if the previous run was killed by the kernel watchdog (stall) or the config failed to apply. Detaching (falling back to CFS) on shutdown is automatic.
+- **`xytro-sched.service`** — attaches the scheduler at boot, applies `~/.config/xytro/xytro.conf` (or falls back to `train/policy6.bin` + the 1 ms slice), restarts on failure, and on a stall/crash walks the **recovery ladder** (known-good → defaults → defaults+dry-run) so xytro **always re-attaches and never parks on stock CFS**. Detaching (falling back to CFS) on shutdown is automatic.
 - **`xytro-agent.service`** — runs the M3 agent as a daemon (observe → reason → steer → A/B → auto-rollback, every 2 minutes), so the policy continuously adapts to your workload with a built-in safety net.
 
 Control them like any service:
@@ -142,7 +146,7 @@ The unit files use `/home/raf/Desktop/Linux-Xytro` — edit `systemd/*.service` 
 2. **Agent** protects shells, terminals, your interactive session, your `protect` list, and a **hard-coded CORE list** (init, kernel threads, xytro's own processes, your DE/shells — these can *never* be removed, even with `--force`).
 3. **You** gate every kill/start through the approval dialog, or pre-authorize via the `allow` list. Locked entries (`--lock`) need `--force` to remove, so a stray `remove` can't accidentally unprotect your important services.
 4. Every decision and action is **notified to you** and written to the **audit log**.
-5. Policy changes are **A/B verified** and **auto-rolled-back** on regression; the live policy is continuously promoted to a **last-known-good snapshot** that the boot wrapper restores automatically after any stall/crash or failed config.
+5. Policy changes are **A/B verified** and **auto-rolled-back** on regression; the live policy is continuously promoted to a **last-known-good snapshot**, and on any stall/crash the boot wrapper walks a recovery ladder (known-good → defaults → defaults+dry-run) so the scheduler **always re-attaches — it never parks on stock CFS**.
 
 Per-machine process lists live in `agent/xytro.xytro` (gitignored; copy the committed `agent/xytro.xytro.example` to create one). Sections: `protect` / `lock-protect` / `allow` / `lock-allow`, comma-separated comm names or pids, `#` comments. The lifecycle service automatically reads it each cycle.
 
