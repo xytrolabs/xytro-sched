@@ -1,5 +1,5 @@
-# xytro.xy - xytro-sched user configuration
-# Copy to agent/xytro.xy (per-machine; gitignored). Edit by hand or via:
+# xytro.xytro - xytro-sched user configuration
+# Copy to agent/xytro.xytro (per-machine; gitignored). Edit by hand or via:
 #   python3 agent/xytro_lifecycle.py tui
 #   python3 agent/xytro_lifecycle.py protect add|remove <name> [--lock] [--force]
 #   python3 agent/xytro_lifecycle.py allow  add|remove <name> [--lock] [--force]

@@ -64,7 +64,7 @@ sudo python3 agent/xytro_agent.py --seconds 30 --live --ab
 # lifecycle: let the AI manage processes (asks your approval for kills)
 python3 agent/xytro_lifecycle.py watch --seconds 30 --phase constrained --live
 
-# manage the protected/allowed process lists (see agent/xytro.xy)
+# manage the protected/allowed process lists (see agent/xytro.xytro)
 python3 agent/xytro_lifecycle.py lists                          # show all lists
 python3 agent/xytro_lifecycle.py tui                           # interactive editor
 python3 agent/xytro_lifecycle.py protect add steam --lock       # protect + lock
@@ -105,7 +105,7 @@ The unit files use `/home/raf/Desktop/Linux-Xytro` — edit `systemd/*.service` 
 4. Every decision and action is **notified to you** and written to the **audit log**.
 5. Policy changes are **A/B verified** and **auto-rolled-back** on regression.
 
-Per-machine process lists live in `agent/xytro.xy` (gitignored; copy the committed `agent/xytro.xy.example` to create one). Sections: `protect` / `lock-protect` / `allow` / `lock-allow`, comma-separated comm names or pids, `#` comments. The lifecycle service automatically reads it each cycle.
+Per-machine process lists live in `agent/xytro.xytro` (gitignored; copy the committed `agent/xytro.xytro.example` to create one). Sections: `protect` / `lock-protect` / `allow` / `lock-allow`, comma-separated comm names or pids, `#` comments. The lifecycle service automatically reads it each cycle.
 
 ## Design
 

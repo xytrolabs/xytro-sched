@@ -40,7 +40,7 @@ The AI also manages **which processes run**: it detects CPU hogs and 2 GB+ memor
 
 - **Kill/start always require human approval** — a notification + a 4-choice dialog (Approve / Approve & allow always / Deny / Deny & protect always)
 - **Every action posts a notification** and writes to an audit log
-- **Persistent allow/protect lists** (`agent/xytro.xy`) let you pre-authorize or permanently protect — with a **hard-coded CORE list** that can never be removed and `--lock` entries that need `--force` to remove, so even a mis-typed command can't unprotect something important. Editable via `xytro_lifecycle.py lists|tui|protect|allow`.
+- **Persistent allow/protect lists** (`agent/xytro.xytro`) let you pre-authorize or permanently protect — with a **hard-coded CORE list** that can never be removed and `--lock` entries that need `--force` to remove, so even a mis-typed command can't unprotect something important. Editable via `xytro_lifecycle.py lists|tui|protect|allow`.
 - Shells, terminals, your session, pid 1, kernel threads — **never touched**
 
 ## 5. Boot integration (`systemd/`)
