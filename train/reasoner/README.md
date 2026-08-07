@@ -10,8 +10,10 @@ Target: **Liquid Foundation Model `LFM2.5-230M`** (0.2B) — Liquid's most compa
 
 ### 1. Install tooling
 ```sh
-sudo pacman -S llama.cpp python-llama-cpp   # llama-cli, llama-quantize, convert script
-pip install datasets transformers peft bitsandbytes accelerate
+sudo pacman -S llama-cpp            # NOTE: the Arch/CachyOS package is `llama-cpp`, NOT `llama.cpp`
+# Python deps in a venv (Arch is PEP-668 externally-managed):
+python3 -m venv ~/.venvs/lfm && source ~/.venvs/lfm/bin/activate
+pip install transformers peft bitsandbytes accelerate huggingface_hub
 ```
 
 ### 2. Pick + download the base LFM
