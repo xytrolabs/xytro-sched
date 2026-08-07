@@ -8,6 +8,9 @@ Wants=local-fs.target
 Type=simple
 ExecStart=/home/raf/Desktop/Linux-Xytro/systemd/xytro-sched-start.sh
 Environment=XYTRO_BASE=/home/raf/Desktop/Linux-Xytro
+# Hyprland-style config lives in the desktop user's ~/.config/xytro (the
+# service runs as root, so ~ would be /root - pin it explicitly).
+Environment=XYTRO_CONFIG_DIR=/home/raf/.config/xytro
 # Always restart: even a clean exit (e.g. the kernel watchdog disabling us on a
 # stall) should bring the scheduler back automatically.
 Restart=always

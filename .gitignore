@@ -21,6 +21,8 @@ agent/*.log
 agent/lists.json
 agent/frozen.json
 agent/xytro.xytro
+# per-machine Hyprland-style scheduler config (live copy if made in-repo)
+config/xytro.conf
 
 # --- python ---
 __pycache__/

@@ -7,6 +7,8 @@ Requires=xytro-sched.service
 [Service]
 Type=simple
 ExecStart=/usr/bin/python3 /home/raf/Desktop/Linux-Xytro/agent/xytro_agent.py --seconds 20 --live --ab --daemon --interval 120
+# Share the desktop user's ~/.config/xytro (service runs as root).
+Environment=XYTRO_CONFIG_DIR=/home/raf/.config/xytro
 Restart=on-failure
 RestartSec=10
 # The agent never runs hot; keep it off the fast lane of its own scheduler.

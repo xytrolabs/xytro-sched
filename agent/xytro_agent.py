@@ -43,7 +43,15 @@ _BASE_FALLBACK = 11_719_753     # policy6.bin trained threshold (steering baseli
 
 
 def _load_threshold_base():
-    """Baseline threshold from the trained policy file (fallback: policy6's)."""
+    """Baseline threshold: the Hyprland-style config first, else policy6.bin."""
+    try:
+        import xytro_config          # agent/xytro_config.py
+        d = xytro_config.load_config()
+        thr = int(d["threshold"])
+        if THRESHOLD_MIN <= thr <= THRESHOLD_MAX:
+            return thr
+    except Exception:
+        pass
     try:
         import struct
         p = os.path.join(ROOT, "train", "policy6.bin")
@@ -297,6 +305,33 @@ def audit_entry(audit, entry):
         f.write(json.dumps(entry) + "\n")
 
 
+def promote_known_good():
+    """Mark the current live policy as last-known-good (it worked)."""
+    try:
+        import xytro_config          # agent/xytro_config.py
+        xytro_config.snapshot_known_good()
+        print("  known-good snapshot updated")
+    except Exception as e:  # noqa: BLE001
+        print("  (known-good promote skipped: %s)" % e)
+
+
+def restore_known_good(pol):
+    """Restore the last-known-good policy (weights included).
+
+    Falls back to the pre-steer threshold+slice if no known-good exists.
+    """
+    try:
+        import xytro_config          # agent/xytro_config.py
+        xytro_config.restore_known_good()
+        return True
+    except Exception as e:  # noqa: BLE001
+        print("  (known-good restore unavailable: %s)" % e)
+        run(["sudo", "-n", STEER, "threshold", str(pol["threshold"])])
+        run(["sudo", "-n", STEER, "slice", str(pol["base_slice_ns"]),
+             str(pol["fast_slice_mult"])])
+        return False
+
+
 def run_once(args):
     """One observe -> reason -> steer -> A/B cycle. Returns True on success."""
     pol, pout = get_policy()
@@ -332,14 +367,13 @@ def run_once(args):
         r0, r1 = reward(m0), reward(m1)
         print("  reward before=%.3f after=%.3f" % (r0, r1))
         if r1 < r0 * (1 - AB_REGRESSION):
-            run(["sudo", "-n", STEER, "threshold", str(pol["threshold"])])
-            run(["sudo", "-n", STEER, "slice", str(pol["base_slice_ns"]),
-                 str(pol["fast_slice_mult"])])
-            print("  REGRESSION -> rolled back to previous policy")
+            restore_known_good(pol)   # loads known-good; falls back to thr+slice
+            print("  REGRESSION -> rolled back to last-known-good policy")
             audit_entry(args.audit,
                         {"ts": time.time(), "event": "rollback",
                          "reason": "reward %0.3f < %0.3f" % (r1, r0)})
         else:
+            promote_known_good()
             print("  no regression -> keeping %s strategy" % strat)
     print("== cycle done; audit log: %s ==" % args.audit)
     return True
