@@ -80,6 +80,7 @@ MULT_MIN = 500
 MULT_MAX = 4000
 MIN_DECISIONS = 500             # skip steering if we saw fewer decisions
 AB_REGRESSION = 0.05            # 5% reward drop -> roll back
+AUDIT_MAX = 8 * 1024 * 1024     # housekeeping: rotate audit.log above 8 MiB
 
 # ---- strategy table: name -> (threshold_factor, base_slice_ns, fast_mult) --
 # threshold_factor is applied to the CURRENT threshold; slices in ns.
@@ -427,6 +428,12 @@ def audit_entry(audit, entry):
     if not audit:
         return
     try:
+        if os.path.exists(audit) and os.path.getsize(audit) > AUDIT_MAX:
+            # housekeeping: keep at most one rotated audit, then start fresh
+            old = audit + ".1"
+            if os.path.exists(old):
+                os.unlink(old)
+            os.rename(audit, old)
         with open(audit, "a") as f:
             f.write(json.dumps(entry) + "\n")
     except OSError as e:
@@ -499,7 +506,7 @@ def run_once(args):
           (args.seconds, args.strategy,
            "LIVE" if args.live else "dry-run/advisory"))
     print("-- baseline observation --")
-    m0 = observe(args.seconds)
+    m0 = observe(args.seconds, args.sample)
     phase = detect_phase(m0)
     strat, why = reason(m0, phase, pol, args.strategy)
     # Optional SLM reasoner (GGUF via llama-simple); falls back if unavailable.
@@ -526,7 +533,7 @@ def run_once(args):
         if rc != 0:
             print("  weight set failed: %s" % out.strip()[:200])
             return True
-        m1 = observe(args.seconds)
+        m1 = observe(args.seconds, args.sample)
         r0, r1 = reward(m0), reward(m1)
         print("  reward before=%.3f after=%.3f" % (r0, r1))
         audit_entry(args.audit,
@@ -576,7 +583,7 @@ def run_once(args):
     # A/B: measure post-steering reward and roll back on regression.
     if args.ab and args.live and action == "applied":
         print("-- A/B: measuring post-steering reward --")
-        m1 = observe(args.seconds)
+        m1 = observe(args.seconds, args.sample)
         r0, r1 = reward(m0), reward(m1)
         print("  reward before=%.3f after=%.3f" % (r0, r1))
         if r1 < r0 * (1 - AB_REGRESSION):
@@ -596,6 +603,9 @@ def main():
     ap = argparse.ArgumentParser(description="xytro-agent (M3 autonomous brain)")
     ap.add_argument("--seconds", type=int, default=30,
                     help="observation window (s)")
+    ap.add_argument("--sample", type=int, default=50,
+                    help="telemetry subsample N (1=all; higher = lighter CPU "
+                         "during observation, default 50)")
     ap.add_argument("--strategy", choices=list(STRATEGIES) + ["auto"],
                     default="auto", help="force a strategy (default: auto)")
     ap.add_argument("--live", action="store_true",

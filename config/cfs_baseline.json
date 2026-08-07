@@ -1,0 +1,15 @@
+{
+  "note": "Recorded schbench -m2 -t8 baselines from BENCHMARKS.md (i5-13400F, 16 threads). xytro-status --bench runs the SAME command under the current scheduler and compares against cfs here. p_* are wakeup latency in microseconds; rps is requests/sec.",
+  "cfs": {
+    "p50_us": 3,
+    "p90_us": 97,
+    "p99_us": 1606,
+    "p999_us": 1658,
+    "rps": 2927
+  },
+  "xytro_best": {
+    "p90_us": 7,
+    "p99_us": 161,
+    "rps": 3259
+  }
+}

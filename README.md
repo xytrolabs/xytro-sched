@@ -82,6 +82,16 @@ python3 agent/xytro_lifecycle.py allow add my-service           # auto-approve k
 
 Requires a kernel with `CONFIG_SCHED_CLASS_EXT=y` and BTF (CachyOS, and any 6.12+ mainline distro kernel have it).
 
+## Health, housekeeping & the "beats CFS" gate
+
+```sh
+make status                    # one-shot health report (or ./tools/xytro-status)
+./tools/xytro-status --bench    # run schbench -m2 -t8 under xytro, compare vs CFS
+./tools/xytro-status --clean    # rotate oversized logs + remove stale temp files
+```
+
+`xytro-status` checks everything at once — scheduler attached, loader uptime, config valid + known-good age, stall/recovery counters, service state, leaked telemetry processes, and the agent's reward trend + recent rollbacks/explorations. `--bench` runs the same `schbench -m2 -t8` used in the benchmarks and compares against the recorded CFS baseline (`config/cfs_baseline.json`), reporting WIN/LOSE per metric (p90/p99 latency, RPS). Exit code is `0` healthy / `1` warnings / `2` not attached, so it can drive a notification or cron check. Agent audit + lifecycle logs auto-rotate above 8 MiB.
+
 ## Configuration (Hyprland-style)
 
 The scheduler policy is configured with a flat, Hyprland-style `key = value` file at `~/.config/xytro/xytro.conf` (override the dir with `XYTRO_CONFIG_DIR`). See the committed template `config/xytro.conf.example`:

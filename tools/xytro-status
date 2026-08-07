@@ -1,0 +1,355 @@
+#!/usr/bin/env python3
+"""xytro-status - one-shot health report + housekeeping + "beats CFS" gate.
+
+Usage:
+  xytro-status                 print the health report (exit 0 = healthy)
+  xytro-status --bench         also run `schbench -m2 -t8` under the current
+                               scheduler and compare against the recorded CFS
+                               baseline (config/cfs_baseline.json)
+  xytro-status --clean         housekeeping: rotate oversized agent logs, remove
+                               stale temp traces / apply staging files
+
+Exit codes:
+  0 = healthy
+  1 = warnings (service down, config problem, leaked process, recent rollback)
+  2 = scheduler not attached / broken
+"""
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+sys.path.insert(0, os.path.join(ROOT, "agent"))
+import xytro_config as C  # noqa: E402
+
+BASELINE = os.path.join(ROOT, "config", "cfs_baseline.json")
+AUDIT = os.path.join(ROOT, "agent", "audit.log")
+LC_AUDIT = os.path.join(ROOT, "agent", "lifecycle_audit.log")
+SERVICES = ["xytro-sched", "xytro-agent", "xytro-lifecycle"]
+LOG_MAX = 8 * 1024 * 1024          # rotate agent logs above 8 MiB
+# schbench's -r/--runtime flags are broken on this build; bound it explicitly.
+BENCH_CMD = ["timeout", "45", "schbench", "-m2", "-t8"]
+
+
+def sh(cmd, timeout=20):
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return p.returncode, (p.stdout or "").strip()
+    except FileNotFoundError:
+        return 127, ""
+    except subprocess.TimeoutExpired:
+        return -1, "timeout"
+
+
+# --------------------------------------------------------------------------
+# health checks
+# --------------------------------------------------------------------------
+
+def scheduler_state():
+    rc, out = sh(["cat", "/sys/kernel/sched_ext/state"])
+    return out if rc == 0 else "unknown"
+
+
+def loader_pid():
+    rc, out = sh(["pgrep", "-f", "bpf/xytro_sched --no-drain"])
+    if rc != 0 or not out:
+        return None
+    return int(out.splitlines()[0])
+
+
+def loader_uptime(pid):
+    rc, out = sh(["ps", "-o", "etimes=", "-p", str(pid)])
+    if rc != 0 or not out:
+        return None
+    try:
+        return int(out.split()[0])
+    except (ValueError, IndexError):
+        return None
+
+
+def services_active():
+    out = {}
+    for svc in SERVICES:
+        rc, res = sh(["systemctl", "is-active", svc])
+        out[svc] = res if rc == 0 else "inactive"
+    return out
+
+
+def leaked_top():
+    rc, out = sh(["pgrep", "-c", "xytro-top"])
+    return int(out) if rc == 0 else 0
+
+
+def audit_summary():
+    """Return dict of agent audit stats from audit.log (if present)."""
+    s = {"cycles": 0, "last_reward": None, "mean10": None,
+         "rollbacks_24h": 0, "explores": 0, "last_rollbacks": []}
+    if not os.path.exists(AUDIT):
+        return s
+    now = time.time()
+    rewards = []
+    try:
+        with open(AUDIT) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    e = json.loads(line)
+                except ValueError:
+                    continue
+                ts = e.get("ts", 0)
+                if "strategy" in e:
+                    s["cycles"] += 1
+                    if e.get("reward") is not None:
+                        rewards.append(e["reward"])
+                if e.get("action") == "explore_weight":
+                    s["explores"] += 1
+                if e.get("event") == "rollback":
+                    if now - ts < 86400:
+                        s["rollbacks_24h"] += 1
+                    if len(s["last_rollbacks"]) < 3:
+                        s["last_rollbacks"].append(
+                            (time.strftime("%m-%d %H:%M", time.localtime(ts)),
+                             e.get("reason", "")))
+    except OSError:
+        return s
+    if rewards:
+        s["last_reward"] = rewards[-1]
+        s["mean10"] = sum(rewards[-10:]) / len(rewards[-10:])
+    return s
+
+
+# --------------------------------------------------------------------------
+# beats-CFS benchmark
+# --------------------------------------------------------------------------
+
+def parse_schbench(out):
+    res = {}
+    for line in out.splitlines():
+        m = re.match(r"^\s*(\d+(?:\.\d+)?)th:\s*(\d+)", line)
+        if m:
+            res["p" + m.group(1).rstrip("0").rstrip(".")] = int(m.group(2))
+        m = re.match(r"^Requests/sec:\s*([\d.]+)", line)
+        if m:
+            res["rps"] = float(m.group(1))
+    return res
+
+
+def run_bench():
+    print("  running %s (30s; under the current scheduler) ..."
+          % " ".join(BENCH_CMD), flush=True)
+    rc, out = sh(BENCH_CMD, timeout=90)
+    if rc != 0:
+        print("  ERROR: schbench failed (rc=%d)\n%s" % (rc, out[:400]))
+        return None
+    return parse_schbench(out)
+
+
+def compare_cfs(measured):
+    try:
+        with open(BASELINE) as f:
+            base = json.load(f)["cfs"]
+    except (OSError, ValueError):
+        print("  (no %s - can't compare)" % BASELINE)
+        return 0
+    checks = [
+        ("p90", "p90_us", measured.get("p90"), base["p90_us"], "lower is better"),
+        ("p99", "p99_us", measured.get("p99"), base["p99_us"], "lower is better"),
+        ("RPS", "rps", measured.get("rps"), base["rps"], "higher is better"),
+    ]
+    wins = losses = 0
+    for label, key, mv, cv, how in checks:
+        if mv is None:
+            print("  %-4s  (not measured)" % label)
+            continue
+        better = mv <= cv if how == "lower is better" else mv >= cv
+        wins += 1 if better else 0
+        losses += 0 if better else 1
+        print("  %-4s  xytro=%s  CFS=%s  -> %s" % (
+            label, mv, cv, "WIN" if better else "LOSE"))
+    if wins + losses:
+        print("  verdict: %s" % ("xytro beats CFS"
+                                 if wins > losses else
+                                 "xytro LOSES to CFS on this run"))
+    return 0 if wins >= losses else 1
+
+
+# --------------------------------------------------------------------------
+# housekeeping
+# --------------------------------------------------------------------------
+
+def rotate_log(path, max_size=LOG_MAX, keep=2):
+    if not os.path.exists(path):
+        return False
+    try:
+        if os.path.getsize(path) < max_size:
+            return False
+        for i in range(keep - 1, 0, -1):
+            src = "%s.%d" % (path, i)
+            dst = "%s.%d" % (path, i + 1)
+            if os.path.exists(dst):
+                os.unlink(dst)
+            if os.path.exists(src):
+                os.rename(src, dst)
+        os.rename(path, path + ".1")
+        print("  rotated %s (%.1f MiB)" % (path, max_size / 1024 / 1024))
+        return True
+    except OSError as e:
+        print("  WARN rotate %s: %s" % (path, e))
+        return False
+
+
+def clean():
+    print("== housekeeping ==")
+    rotate_log(AUDIT)
+    rotate_log(LC_AUDIT)
+    # stale temp traces + apply staging files
+    patterns = ["/tmp/xytro_agent_*.jsonl", "/tmp/ab_*.jsonl",
+                "/tmp/ab_live.bin", "/tmp/orig_live.bin",
+                os.path.join(C.paths()["dir"], ".apply.bin")]
+    import glob
+    for pat in patterns:
+        for f in glob.glob(pat):
+            try:
+                os.unlink(f)
+                print("  removed %s" % f)
+            except OSError:
+                pass
+    # old throwaway config dirs
+    for d in glob.glob("/tmp/xycfg-*"):
+        try:
+            sh(["rm", "-rf", d])
+            print("  removed %s" % d)
+        except Exception:
+            pass
+    print("  done.")
+
+
+# --------------------------------------------------------------------------
+# report
+# --------------------------------------------------------------------------
+
+def report(bench=False):
+    code = 0
+    L = []
+    L.append("== xytro health ==")
+
+    state = scheduler_state()
+    healthy = state == "enabled"
+    if not healthy:
+        code = max(code, 2)
+    L.append("scheduler        %s" % (state if healthy else state + "  (NOT attached)"))
+    pid = loader_pid()
+    if pid:
+        up = loader_uptime(pid)
+        L.append("loader pid       %d%s" % (pid, (" (up %ds)" % up) if up else ""))
+    else:
+        L.append("loader pid       (not found)")
+        code = max(code, 2)
+
+    st = C._read_state()
+    p = C.paths()
+    L.append("config           %s%s" % (
+        p["config"], "" if os.path.exists(p["config"]) else "  (missing!)"))
+    L.append("config valid     %s" % ("yes" if _config_valid() else "NO"))
+    if not _config_valid():
+        code = max(code, 1)
+    L.append("known_good       %s" % (
+        "present" if os.path.exists(p["known_bin"]) else "none"))
+    kg = st.get("known_good_ts")
+    if kg:
+        L.append("known_good_age   %ds" % (time.time() - kg))
+    L.append("stall_count      %s" % st.get("stall_count", 0))
+    L.append("recoveries       %s" % st.get("recoveries", 0))
+    if st.get("stall_count", 0) >= 2:
+        code = max(code, 1)
+
+    svcs = services_active()
+    for svc, act in svcs.items():
+        ok = act == "active"
+        if not ok:
+            code = max(code, 1)
+        L.append("%-16s %s" % (svc, act))
+
+    leaked = leaked_top()
+    if leaked > 1:
+        code = max(code, 1)
+    L.append("leaked xytro-top  %d%s" % (
+        leaked, "" if leaked <= 1 else "  (!! multiple = leak)"))
+
+    au = audit_summary()
+    L.append("agent cycles     %d" % au["cycles"])
+    if au["last_reward"] is not None:
+        L.append("reward last/avg10 %.3f / %.3f" % (au["last_reward"], au["mean10"]))
+    L.append("rollbacks (24h)  %d%s" % (au["rollbacks_24h"], "  (!!)" if au["rollbacks_24h"] > 3 else ""))
+    L.append("weight explores  %d" % au["explores"])
+    for when, why in au["last_rollbacks"]:
+        L.append("  rollback %s: %s" % (when, why[:70]))
+
+    print("\n".join(L))
+
+    # beats-CFS gate
+    print("\n== vs CFS (schbench reference: p90 %dus / p99 %dus / RPS %d) ==" % (
+        97, 1606, 2927))
+    au = audit_summary()
+    if au["last_reward"] is not None:
+        print("  (live desktop p99 ~%.1fus from the agent's last observation; "
+              "the schbench p99 reference is under `schbench -m2 -t8` load)" % (
+                  _last_p99() or 0))
+    if bench:
+        m = run_bench()
+        if m:
+            code = max(code, compare_cfs(m))
+    else:
+        print("  (add --bench to run schbench under the current scheduler)")
+
+    return code
+
+
+def _config_valid():
+    try:
+        C.load_config()
+        return True
+    except Exception:
+        return False
+
+
+def _last_p99():
+    try:
+        with open(AUDIT) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    e = json.loads(line)
+                except ValueError:
+                    continue
+                if "strategy" in e and e.get("metrics", {}).get("p99_us"):
+                    return e["metrics"]["p99_us"]
+    except OSError:
+        pass
+    return None
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description="xytro health / beats-CFS / housekeeping")
+    ap.add_argument("--bench", action="store_true",
+                    help="run schbench -m2 -t8 under the current scheduler and "
+                         "compare vs the recorded CFS baseline")
+    ap.add_argument("--clean", action="store_true",
+                    help="housekeeping: rotate logs + remove stale temp files")
+    args = ap.parse_args(argv)
+    if args.clean:
+        clean()
+    return report(bench=args.bench)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
