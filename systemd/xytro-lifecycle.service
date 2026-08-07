@@ -6,11 +6,12 @@ Wants=xytro-sched.service
 
 [Service]
 Type=simple
-# constrained phase = auto freeze/prio only (both reversible/safe); kill and
-# start are never auto-proposed in this phase, so the unattended service can't
-# harm anything. Each cycle watches 60s, acts on the worst hog, then exits;
-# Restart=always makes it continuous. The scheduler must be up first.
-ExecStart=/usr/bin/python3 /home/raf/Desktop/Linux-Xytro/agent/xytro_lifecycle.py watch --seconds 60 --live --phase constrained
+# full phase: can PROPOSE freeze/prio/kill/start. kill/start only EXECUTE after
+# the approval dialog or an allow-list entry — approval is fail-closed (no
+# display, missing session, or timeout => DENY), so the unattended service can
+# never kill without explicit human OK. Each cycle watches 60s, acts on the
+# worst hog, then exits; Restart=always makes it continuous.
+ExecStart=/usr/bin/python3 /home/raf/Desktop/Linux-Xytro/agent/xytro_lifecycle.py watch --seconds 60 --live --phase full
 Restart=always
 RestartSec=5
 # The agent never runs hot; keep it off the fast lane of its own scheduler.
