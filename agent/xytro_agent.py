@@ -44,15 +44,13 @@ _BASE_FALLBACK = 11_719_753     # policy6.bin trained threshold (steering baseli
 
 
 def _load_threshold_base():
-    """Baseline threshold: the Hyprland-style config first, else policy6.bin."""
-    try:
-        import xytro_config          # agent/xytro_config.py
-        d = xytro_config.load_config()
-        thr = int(d["threshold"])
-        if THRESHOLD_MIN <= thr <= THRESHOLD_MAX:
-            return thr
-    except Exception:
-        pass
+    """Steering baseline threshold: the trained policy .bin (stable anchor).
+
+    Deliberately NOT the xytro.conf `threshold` key: restore_known_good()
+    re-renders that key from the live (steered) policy, so reading it as the
+    baseline lets the fast-lane bar ratchet down after every restore. Anchoring
+    to the trained policy keeps the absolute-baseline ratchet guarantee.
+    """
     try:
         import struct
         p = os.path.join(ROOT, "train", "policy6.bin")
@@ -62,6 +60,14 @@ def _load_threshold_base():
                 thr, _b, _m, _d = struct.unpack("<iiiI", f.read(16))
                 if 0 < thr <= THRESHOLD_MAX:
                     return thr
+    except Exception:
+        pass
+    try:
+        import xytro_config          # agent/xytro_config.py
+        d = xytro_config.load_config()
+        thr = int(d["threshold"])
+        if THRESHOLD_MIN <= thr <= THRESHOLD_MAX:
+            return thr
     except Exception:
         pass
     return _BASE_FALLBACK
