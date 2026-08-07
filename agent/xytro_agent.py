@@ -254,74 +254,6 @@ def reason(m, phase, pol, strategy):
     return strat, "\n".join(lines)
 
 
-def llm_reason(args, m, phase):
-    """Ask an SLM (GGUF via llama.cpp) to choose a strategy + reason.
-
-    Returns (strategy, reason_text) or (None, None) on any failure so the
-    caller falls back to the deterministic rule-based reasoner.
-    """
-    import re
-    import shutil
-    import subprocess
-
-    if not getattr(args, "llm", None):
-        return None, None
-    exe = shutil.which("llama-simple")
-    if not exe:
-        print("--llm set but llama-simple not found; using rule-based reasoner")
-        return None, None
-    summary = "decisions=%d dec/s=%.0f fast_ratio=%.2f latency_p50=%s p90=%s p99=%sus phase=%s" % (
-        m.dec, m.dec_per_s, m.fast_ratio,
-        fmt(m.pct(0.50)), fmt(m.pct(0.90)), fmt(m.pct(0.99)), phase)
-    user_msg = (
-        "You are xytro-agent, the AI steersman of a CPU scheduler. "
-        "Pick exactly one strategy from {interactive, throughput, balanced, power} "
-        "and give a one-sentence reason.\n"
-        "Example:\n"
-        "Telemetry: decisions=900 dec/s=3000 fast_ratio=0.90 latency_p50=20.0 p90=90.0 p99=1000us phase=active\n"
-        "STRATEGY=interactive\n"
-        "REASON=High p99 and wakeups, push more work to the fast lane.\n"
-        "\n"
-        "Telemetry: " + summary +
-        "\nRespond with:\nSTRATEGY=<one word>\nREASON=<one short sentence>")
-    # LFM2.5 (lfm2 arch) chat template: <|startoftext|><|im_start|>user\n...<|im_end|>\n<|im_start|>assistant\n
-    prompt = ("<|startoftext|><|im_start|>user\n" + user_msg +
-              "<|im_end|>\n<|im_start|>assistant\n")
-    try:
-        # llama-simple is a one-shot example binary (no interactive REPL): it
-        # prints the generation to stdout and exits. New session + /dev/null
-        # stdin keeps it fully detached; stderr carries logs (non-UTF-8 progress).
-        r = subprocess.run(
-            [exe, "-m", args.llm, "-n", "96", prompt],
-            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, start_new_session=True,
-            text=True, timeout=90)
-        out = r.stdout or ""
-    except Exception as e:  # noqa: BLE001
-        print("llm reasoner failed (%s); using rule-based reasoner" % e)
-        return None, None
-    # llama-simple may echo the BOS/prompt; parse only the generation after the
-    # final assistant marker. LFM often numbers the option ("STRATEGY=1: Balanced")
-    # and may say "Explanation:" instead of "REASON=".
-    gen = out
-    mark = "<|im_start|>assistant"
-    idx = out.rfind(mark)
-    if idx != -1:
-        gen = out[idx + len(mark):]
-    sm = re.search(r"STRATEGY\s*=\s*(?:\d+\s*:\s*)?(\w+)", gen, re.IGNORECASE)
-    rm = re.search(r"(?:REASON|Explanation)\s*[=:]\s*(.+)", gen, re.IGNORECASE)
-    if not sm:
-        # prose fallback: "The correct strategy is balanced."
-        wm = re.search(r"\b(interactive|throughput|balanced|power)\b", gen, re.IGNORECASE)
-        strat = wm.group(1).lower() if wm else None
-    else:
-        strat = sm.group(1).lower()
-    if strat not in STRATEGIES:
-        strat = None
-    reason_txt = (rm.group(1).strip().strip('"') if rm else "") or ("SLM: " + gen.strip()[:120])
-    return (strat, reason_txt) if strat else (None, None)
-
-
 def fmt(v):
     return "%.1f" % v if v is not None else "n/a"
 
@@ -380,12 +312,6 @@ def run_once(args):
     m0 = observe(args.seconds)
     phase = detect_phase(m0)
     strat, why = reason(m0, phase, pol, args.strategy)
-    # Optional SLM reasoner (GGUF via llama-simple); falls back if unavailable.
-    llm_strat, llm_txt = llm_reason(args, m0, phase)
-    if llm_strat:
-        strat = llm_strat
-        why = why + "\nSLM: " + llm_txt
-        print("  (SLM reasoner) strategy=%s" % llm_strat)
     print(why)
     action, delta, note = steer(pol, strat, args.live, args.audit)
 
@@ -431,10 +357,6 @@ def main():
                     help="A/B: measure after, auto-rollback on regression")
     ap.add_argument("--audit", default=os.path.join(HERE, "audit.log"),
                     help="append-only audit log path")
-    ap.add_argument("--llm", default=None, metavar="GGUF",
-                    help="path to a Q3-quantized SLM (GGUF) used as the "
-                         "reasoner via llama-simple; falls back to the rule-based "
-                         "CoT reasoner if unset/unavailable")
     ap.add_argument("--daemon", action="store_true",
                     help="loop forever (for the systemd boot service)")
     ap.add_argument("--interval", type=int, default=120,
