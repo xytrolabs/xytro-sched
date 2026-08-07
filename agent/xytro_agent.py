@@ -233,6 +233,49 @@ def reason(m, phase, pol, strategy):
     return strat, "\n".join(lines)
 
 
+def llm_reason(args, m, phase):
+    """Ask an SLM (GGUF via llama.cpp) to choose a strategy + reason.
+
+    Returns (strategy, reason_text) or (None, None) on any failure so the
+    caller falls back to the deterministic rule-based reasoner.
+    """
+    import re
+    import shutil
+    import subprocess
+
+    if not getattr(args, "llm", None):
+        return None, None
+    exe = shutil.which("llama-cli")
+    if not exe:
+        print("--llm set but llama-cli not found; using rule-based reasoner")
+        return None, None
+    summary = "decisions=%d dec/s=%.0f fast_ratio=%.2f latency_p50=%s p90=%s p99=%sus phase=%s" % (
+        m.dec, m.dec_per_s, m.fast_ratio,
+        fmt(m.pct(0.50)), fmt(m.pct(0.90)), fmt(m.pct(0.99)), phase)
+    prompt = (
+        "You are xytro-agent, the AI steersman of a CPU scheduler. "
+        "Pick exactly one strategy from {interactive, throughput, balanced, power} "
+        "and give a one-sentence reason.\n"
+        "Telemetry: " + summary +
+        "\nRespond with:\nSTRATEGY=<one word>\nREASON=<one short sentence>")
+    try:
+        r = subprocess.run(
+            [exe, "-m", args.llm, "-p", prompt, "-n", 96,
+             "--no-display-prompt", "-no-cnv"],
+            capture_output=True, text=True, timeout=90)
+        out = r.stdout or ""
+    except Exception as e:  # noqa: BLE001
+        print("llm reasoner failed (%s); using rule-based reasoner" % e)
+        return None, None
+    sm = re.search(r"STRATEGY\s*=\s*(\w+)", out)
+    rm = re.search(r"REASON\s*=\s*(.+)", out)
+    strat = sm.group(1).lower() if sm else None
+    if strat not in STRATEGIES:
+        strat = None
+    reason_txt = (rm.group(1).strip() if rm else "") or ("SLM: " + out.strip()[:120])
+    return (strat, reason_txt) if strat else (None, None)
+
+
 def fmt(v):
     return "%.1f" % v if v is not None else "n/a"
 
@@ -290,6 +333,12 @@ def run_once(args):
     m0 = observe(args.seconds)
     phase = detect_phase(m0)
     strat, why = reason(m0, phase, pol, args.strategy)
+    # Optional SLM reasoner (Q3 GGUF via llama-cli); falls back if unavailable.
+    llm_strat, llm_txt = llm_reason(args, m0, phase)
+    if llm_strat:
+        strat = llm_strat
+        why = why + "\nSLM: " + llm_txt
+        print("  (SLM reasoner) strategy=%s" % llm_strat)
     print(why)
     action, delta, note = steer(pol, strat, args.live, args.audit)
 
@@ -335,6 +384,10 @@ def main():
                     help="A/B: measure after, auto-rollback on regression")
     ap.add_argument("--audit", default=os.path.join(HERE, "audit.log"),
                     help="append-only audit log path")
+    ap.add_argument("--llm", default=None, metavar="GGUF",
+                    help="path to a Q3-quantized SLM (GGUF) used as the "
+                         "reasoner via llama-cli; falls back to the rule-based "
+                         "CoT reasoner if unset/unavailable")
     ap.add_argument("--daemon", action="store_true",
                     help="loop forever (for the systemd boot service)")
     ap.add_argument("--interval", type=int, default=120,
