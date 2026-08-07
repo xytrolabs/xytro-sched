@@ -74,7 +74,9 @@ The agent steers the scheduler by **writing to BPF maps at runtime** (no recompi
 - Accepts hot model updates from the training pipeline.
 
 ### 4.3 CoT reasoner + subagents
-- CoT LLM (userspace, llama.cpp/GGUF) at macro cadence: explains decisions, generates `$reason` text, decides strategy switches on ambiguous workload signals.
+- **Macro-cadence SLM (small language model) in userspace** (llama.cpp/GGUF) — *never* in the per-event kernel path (that stays a tiny fixed-point model). Explains decisions, generates `$reason` text, decides strategy switches on ambiguous workload signals.
+- **Candidate: a Liquid Foundation Model (LFM, Liquid AI)** — e.g. LFM-1B/3B — as the SLM, for its efficiency/quality-per-parameter; export as **GGUF quantized to Q3** for minimal memory + CPU footprint at macro cadence. (For accuracy-sensitive use, Q4/Q5 preserves fidelity better; Q3 is the smallest usable level.)
+- **Training/quantization pipeline** (`train/reasoner/`): build an action/reason dataset from the audit log + telemetry summaries → fine-tune the LFM (or few-shot) → `llama.cpp` convert + `quantize` to Q3 GGUF → hot-plug into the agent as a `--llm` reasoner (rule-based CoT stays the deterministic fallback).
 - Subagent queue (the `<task>$` idea): `reason` (text), `probe` (allowlisted shell inspection), `classify` — each with token/time budgets, reporting back.
 
 ### 4.4 Lifecycle manager (the original token protocol)
@@ -83,6 +85,10 @@ The agent steers the scheduler by **writing to BPF maps at runtime** (no recompi
 
 ### 4.5 Reward / evaluation loop
 - `reward = f(interactivity latency, throughput, fairness, power via RAPL)` — the objective the agent optimizes. Metrics drive strategy selection, weight tuning, and rollback.
+- **Clarification (what is trained vs rule-based):**
+  - *Trained AI today:* the **in-kernel policy** (policy6.bin) — a supervised logistic model trained on labeled traces (80.5% acc).
+  - *Rule-based today:* the **reasoner** (deterministic OBSERVE/INFER/DECIDE/REASON) and **lifecycle** hog detection.
+  - *The reward is NOT the training signal for policy6.* It is a **hand-defined online scorecard** the agent uses to accept/reject its own live steering deltas (A/B + auto-rollback = a tiny online bandit step). It doubles as the objective for future RL-based policy training/retraining (§7).
 
 ## 5. Action protocol (formal schema)
 
@@ -123,7 +129,7 @@ Every action carries `pid`, `reason` (always), `ttl`, and `flags` (auto-approved
 ## 7. Training pipeline
 - `train/` (offline): collect telemetry traces (M0) → label with a rule-based supervisor or train via RL on the reward metric → **distill** into the tiny fast-policy net → quantize to int8 → export `.bin` weights.
 - The agent hot-loads new weights into the BPF map at runtime; no kernel rebuild for model updates.
-- Reasoner: pretrained small LLM (GGUF), optionally fine-tuned on action/reason pairs.
+- Reasoner: pretrained small language model (SLM) — candidate Liquid Foundation Model (LFM-1B/3B) — exported as GGUF, quantized **Q3** for minimal footprint.
 
 ## 8. Repository layout (Linux-Xytro)
 ```
