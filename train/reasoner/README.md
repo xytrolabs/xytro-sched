@@ -4,7 +4,7 @@ Turns the agent's real decisions into a fine-tuned **small language model**
 that acts as the macro-cadence reasoner — choosing a strategy and writing the
 `$reason` text — with a **Q3-quantized GGUF** for minimal memory/CPU footprint.
 
-Target: **Liquid Foundation Model, LFM2.5-350M** (0.4B) as the *minimal* choice, or **LFM2-1.2B** if you want more reliable format-following. Liquid's lineup goes all the way down to **230M** (plus task-specific "Liquid Nanos"), and there are **official GGUF releases** (e.g. `LiquidAI/LFM2.5-2.6B-GGUF`), so llama.cpp compatibility is a given and a Q3 GGUF may already exist on Hugging Face — check before converting.
+Target: **Liquid Foundation Model `LFM2.5-230M`** (0.2B) — Liquid's most compact model, built for lightweight on-device agentic pipelines, with an official **GGUF** repo (`LiquidAI/LFM2.5-230M-GGUF`, 24 quantizations) and official LoRA fine-tuning (Unsloth/TRL). At Q3 it's ~100 MB — the smallest usable reasoner for our narrow pick-a-strategy task.
 
 ## The four steps
 
@@ -15,16 +15,16 @@ pip install datasets transformers peft bitsandbytes accelerate
 ```
 
 ### 2. Pick + download the base LFM
-Liquid AI hosts models on Hugging Face (`LiquidAI/`). Current lineup includes
-LFM2.5-**230M**, **350M**, **2.6B**, **8B-A1B**, plus task-specific **Liquid Nanos**
-(LFM2-350M-Extract, LFM2-1.2B-RAG, …). For a minimal reasoner, try
-**LFM2.5-350M**; for better format reliability, **LFM2-1.2B**.
+Chosen: **LiquidAI/LFM2.5-230M** (0.2B). There's also an official **GGUF** repo
+(`LiquidAI/LFM2.5-230M-GGUF`) — grab a Q3 there to skip the convert step, or
+grab the base model for fine-tuning:
 
 ```sh
 pip install huggingface_hub
-# either the raw model (to fine-tune), or an official GGUF if one exists at Q3:
-huggingface-cli download LiquidAI/LFM2.5-350M --local-dir lfm-base
-# GGUF variant (if present): huggingface-cli download LiquidAI/LFM2.5-350M-GGUF --local-dir lfm-gguf
+# base model (for fine-tuning):
+huggingface-cli download LiquidAI/LFM2.5-230M --local-dir lfm-base
+# OR official GGUF (check which quants exist):
+huggingface-cli download LiquidAI/LFM2.5-230M-GGUF --local-dir lfm-gguf
 ```
 
 ### 3. Build the dataset + fine-tune (QLoRA)
