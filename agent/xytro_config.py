@@ -237,6 +237,23 @@ def _int(cfg, keys, default, lo=None, hi=None):
     return iv
 
 
+def _float(cfg, keys, default, lo=None, hi=None):
+    v = default
+    for k in keys:
+        if k in cfg:
+            v = cfg[k]
+            break
+    try:
+        fv = float(v)
+    except (TypeError, ValueError):
+        raise ValueError("invalid number for '%s': %r" % (keys[0], v))
+    if lo is not None and fv < lo:
+        raise ValueError("%s=%s below minimum %s" % (keys[0], v, lo))
+    if hi is not None and fv > hi:
+        raise ValueError("%s=%s above maximum %s" % (keys[0], v, hi))
+    return fv
+
+
 def load_config(path=None, cfg=None):
     """Resolve a config file into a validated flat dict (ints).
 
@@ -271,6 +288,8 @@ def load_config(path=None, cfg=None):
     d["fast_slice_mult"] = _int(cfg, ["fast_slice_mult"], d["fast_slice_mult"],
                                 lo=MULT_MIN, hi=MULT_MAX)
     d["dry_run"] = _int(cfg, ["dry_run"], d["dry_run"], lo=0, hi=1)
+    # non-policy settings the agent reads from the same file
+    d["explore_eps"] = _float(cfg, ["explore_eps"], 0.15, lo=0.0, hi=1.0)
     return d
 
 

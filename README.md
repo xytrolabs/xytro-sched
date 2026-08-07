@@ -104,6 +104,8 @@ dry_run = 0
 
 Values override the `policy` .bin (or built-in defaults) and are applied atomically via `xytro-steer load`. `systemd/install.sh` seeds this file for you; `agent/xytro_config.py` is the manager (`validate | apply | promote | restore | status`). The agent reads its steering baseline from this file.
 
+**Learning** — the agent also reads `explore_eps` (default `0.15`) from this file. With that probability each live A/B cycle it tries something new instead of just exploiting: it perturbs one score weight by a small bounded step (`steer set`, kept only if the A/B reward improves, reverted on regression) or tries a random alternate strategy (kept/rolled back by the same A/B). The result is promoted to last-known-good on success, so the policy keeps hunting for improvements instead of settling on one point. Set `explore_eps = 0` for exploit-only.
+
 **Last-known-good restore** — the config dir also keeps `known_good.bin` + `known_good.conf` + `history.jsonl` + `state.json`:
 
 - `apply` is **provisional**: it first snapshots the current live policy as known-good, then loads your config. If the new config later stalls the scheduler, the boot wrapper auto-restores the known-good config.
