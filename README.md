@@ -61,6 +61,14 @@ sudo ./tools/xytro-top
 # autonomous agent: observe → reason → steer → A/B → auto-rollback
 sudo python3 agent/xytro_agent.py --seconds 30 --live --ab
 
+# Hyprland-style scheduler config + last-known-good restore (see below)
+python3 agent/xytro_config.py status                 # show config/known-good state
+python3 agent/xytro_config.py show                   # print the live policy as config
+python3 agent/xytro_config.py validate --file ~/.config/xytro/xytro.conf
+python3 agent/xytro_config.py apply                  # apply + keep a rollback point
+python3 agent/xytro_config.py promote                # mark current policy as known-good
+python3 agent/xytro_config.py restore                # load last-known-good
+
 # lifecycle: let the AI manage processes (asks your approval for kills)
 python3 agent/xytro_lifecycle.py watch --seconds 30 --phase constrained --live
 
@@ -74,6 +82,35 @@ python3 agent/xytro_lifecycle.py allow add my-service           # auto-approve k
 
 Requires a kernel with `CONFIG_SCHED_CLASS_EXT=y` and BTF (CachyOS, and any 6.12+ mainline distro kernel have it).
 
+## Configuration (Hyprland-style)
+
+The scheduler policy is configured with a flat, Hyprland-style `key = value` file at `~/.config/xytro/xytro.conf` (override the dir with `XYTRO_CONFIG_DIR`). See the committed template `config/xytro.conf.example`:
+
+```conf
+# comment ; keys are case-insensitive ; every key is optional
+policy = train/policy6.bin     # optional learned-policy base
+weight.wakeup = -1949
+weight.nice = 16299
+weight.kthread = 12181
+weight.util = 19998
+weight.wake_freq = -3184
+weight.rqdepth = 0
+weight.bias = -3601
+threshold = 11719753
+base_slice_ns = 1000000
+fast_slice_mult = 1000
+dry_run = 0
+```
+
+Values override the `policy` .bin (or built-in defaults) and are applied atomically via `xytro-steer load`. `systemd/install.sh` seeds this file for you; `agent/xytro_config.py` is the manager (`validate | apply | promote | restore | status`). The agent reads its steering baseline from this file.
+
+**Last-known-good restore** — the config dir also keeps `known_good.bin` + `known_good.conf` + `history.jsonl` + `state.json`:
+
+- `apply` is **provisional**: it first snapshots the current live policy as known-good, then loads your config. If the new config later stalls the scheduler, the boot wrapper auto-restores the known-good config.
+- `promote` (or the agent, after a clean A/B cycle) marks the current policy as last-known-good.
+- On a **kernel-watchdog stall**, the loader exits non-zero, and on restart the boot wrapper loads the last-known-good config instead of re-applying the one that broke — and reverts `xytro.conf` to match. Bad values in the file are rejected without touching the live policy.
+
+
 ## Auto-start on boot (systemd)
 
 Make xytro the default scheduler that boots with your machine, plus the autonomous agent as a daemon:
@@ -84,7 +121,7 @@ sudo bash systemd/install.sh
 
 This installs two units:
 
-- **`xytro-sched.service`** — attaches the scheduler at boot, hot-loads `train/policy6.bin`, sets the 1 ms slice, and restarts on failure. Detaching (falling back to CFS) on shutdown is automatic.
+- **`xytro-sched.service`** — attaches the scheduler at boot, applies `~/.config/xytro/xytro.conf` (or falls back to `train/policy6.bin` + the 1 ms slice), restarts on failure, and **auto-restores the last-known-good config** if the previous run was killed by the kernel watchdog (stall) or the config failed to apply. Detaching (falling back to CFS) on shutdown is automatic.
 - **`xytro-agent.service`** — runs the M3 agent as a daemon (observe → reason → steer → A/B → auto-rollback, every 2 minutes), so the policy continuously adapts to your workload with a built-in safety net.
 
 Control them like any service:
@@ -103,7 +140,7 @@ The unit files use `/home/raf/Desktop/Linux-Xytro` — edit `systemd/*.service` 
 2. **Agent** protects shells, terminals, your interactive session, your `protect` list, and a **hard-coded CORE list** (init, kernel threads, xytro's own processes, your DE/shells — these can *never* be removed, even with `--force`).
 3. **You** gate every kill/start through the approval dialog, or pre-authorize via the `allow` list. Locked entries (`--lock`) need `--force` to remove, so a stray `remove` can't accidentally unprotect your important services.
 4. Every decision and action is **notified to you** and written to the **audit log**.
-5. Policy changes are **A/B verified** and **auto-rolled-back** on regression.
+5. Policy changes are **A/B verified** and **auto-rolled-back** on regression; the live policy is continuously promoted to a **last-known-good snapshot** that the boot wrapper restores automatically after any stall/crash or failed config.
 
 Per-machine process lists live in `agent/xytro.xytro` (gitignored; copy the committed `agent/xytro.xytro.example` to create one). Sections: `protect` / `lock-protect` / `allow` / `lock-allow`, comma-separated comm names or pids, `#` comments. The lifecycle service automatically reads it each cycle.
 

@@ -114,6 +114,7 @@ int main(int argc, char **argv)
 	bool no_drain = false;
 	u32 key = 0;
 	int err;
+	int rc = 0;   /* 0 = clean detach; 1 = kernel watchdog disabled us (stall) */
 
 	for (int i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "--no-drain"))
@@ -225,6 +226,11 @@ int main(int argc, char **argv)
 	if (UEI_EXITED(skel, uei)) {
 		fprintf(stderr, "xytro_sched: scheduler was disabled by the kernel:\n");
 		UEI_REPORT(skel, uei);
+		/* Non-zero exit = the scheduler broke (kernel watchdog disabled it
+		 * after a stall). The boot wrapper uses this to restore the
+		 * last-known-good config instead of re-applying the one that
+		 * broke. A clean Ctrl+C/SIGTERM detach still exits 0. */
+		rc = 1;
 	}
 	printf("xytro_sched: detaching...\n");
 
@@ -234,5 +240,5 @@ out:
 	bpf_map__unpin(skel->maps.xytro_policy, POLICY_PIN_PATH);
 	bpf_map__unpin(skel->maps.xytro_active, ACTIVE_PIN_PATH);
 	xytro_sched_bpf__destroy(skel);
-	return 0;
+	return rc;
 }

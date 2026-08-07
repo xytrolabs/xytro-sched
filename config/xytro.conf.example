@@ -1,0 +1,28 @@
+# xytro.conf - xytro-sched scheduler configuration (Hyprland-style)
+# Copy to ~/.config/xytro/xytro.conf (per-machine). Syntax:
+#     key = value
+#     # comment
+# Keys are case-insensitive; every key is optional. Values override the
+# `policy` base (a learned 44-byte .bin) or the built-in defaults.
+#
+# Manage with:  python3 agent/xytro_config.py validate|apply|promote|restore|status
+# The boot service auto-applies this file and auto-restores the last known
+# working config if something breaks (kernel watchdog stall, bad values).
+
+# --- optional learned-policy base (a 44-byte .bin relative to the repo) ---
+policy = train/policy6.bin
+
+# --- scoring weights (weights[] in bpf/intf.h) ---
+weight.wakeup = -1949
+weight.nice = 16299
+weight.kthread = 12181
+weight.util = 19998
+weight.wake_freq = -3184
+weight.rqdepth = 0
+weight.bias = -3601
+
+# --- fast-lane bar / slices ---
+threshold = 11719753        # score above this gets the fast lane
+base_slice_ns = 1000000     # normal-lane slice (ns); boot default was 1 ms
+fast_slice_mult = 1000      # fast slice = base * mult / 1000
+dry_run = 0                 # 1 = log decisions but force the normal lane

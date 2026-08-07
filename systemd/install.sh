@@ -19,6 +19,17 @@ fi
 
 chmod +x "$BASE/systemd/xytro-sched-start.sh"
 
+# Seed the Hyprland-style config dir for the desktop user if it's missing.
+CFG_USER="${XYTRO_CFG_USER:-raf}"
+CFG_DIR="/home/$CFG_USER/.config/xytro"
+mkdir -p "$CFG_DIR"
+if [ ! -f "$CFG_DIR/xytro.conf" ]; then
+    cp "$BASE/config/xytro.conf.example" "$CFG_DIR/xytro.conf"
+    echo "created $CFG_DIR/xytro.conf from example"
+fi
+chown -R "$CFG_USER":"$CFG_USER" "$CFG_DIR" 2>/dev/null || true
+chmod -R u+rw "$CFG_DIR"
+
 echo "== installing units =="
 cp "$BASE/systemd/xytro-sched.service" "$UNITDIR/"
 cp "$BASE/systemd/xytro-agent.service" "$UNITDIR/"
