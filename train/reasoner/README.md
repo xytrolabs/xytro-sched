@@ -1,62 +1,74 @@
-# SLM reasoner pipeline (Liquid Foundation Model → Q3 GGUF)
+# SLM reasoner pipeline (Liquid Foundation Model → Q4 GGUF)
 
-Turns the agent's real decisions into a fine-tuned **small language model**
-that acts as the macro-cadence reasoner — choosing a strategy and writing the
-`$reason` text — with a **Q3-quantized GGUF** for minimal memory/CPU footprint.
+Turns the agent's real decisions into a **small language model** that acts as
+the macro-cadence reasoner — choosing a strategy and writing the reason text —
+as a quantized **GGUF** for a tiny memory/CPU/GPU footprint.
 
-Target: **Liquid Foundation Model `LFM2.5-230M`** (0.2B) — Liquid's most compact model, built for lightweight on-device agentic pipelines, with an official **GGUF** repo (`LiquidAI/LFM2.5-230M-GGUF`, 24 quantizations) and official LoRA fine-tuning (Unsloth/TRL). At Q3 it's ~100 MB — the smallest usable reasoner for our narrow pick-a-strategy task.
+Target: **Liquid Foundation Model `LFM2.5-230M`** (0.2B), official GGUF repo
+`LiquidAI/LFM2.5-230M-GGUF`.
 
-## The four steps
+> **Verified 2026-08-06:** the official GGUF repo ships **no Q3_K_M** — only
+> F16/BF16/Q4_0/Q4_K_M/Q5_K_M/Q6_K/Q8_0. We run **Q4_0** (143 MB) directly,
+> which on the RTX 4060 (Vulkan) answers in ~0.6 s — no quantization needed.
+> Quantizing further is optional (see step 4b).
+
+## The steps
 
 ### 1. Install tooling
 ```sh
-sudo pacman -S llama-cpp            # NOTE: the Arch/CachyOS package is `llama-cpp`, NOT `llama.cpp`
-# Python deps in a venv (Arch is PEP-668 externally-managed):
-python3 -m venv ~/.venvs/lfm && source ~/.venvs/lfm/bin/activate
-pip install transformers peft bitsandbytes accelerate huggingface_hub
+sudo pacman -S llama-cpp            # package is `llama-cpp`, NOT `llama.cpp`
+# Python deps in a venv (Arch is PEP-668 externally-managed). Use ABSOLUTE paths
+# and avoid `source` — the waash shell doesn't expand `~` or support `source`.
+python3 -m venv /home/raf/.venvs/lfm
+/home/raf/.venvs/lfm/bin/pip install -U pip huggingface_hub
 ```
 
-### 2. Pick + download the base LFM
-Chosen: **LiquidAI/LFM2.5-230M** (0.2B). There's also an official **GGUF** repo
-(`LiquidAI/LFM2.5-230M-GGUF`) — grab a Q3 there to skip the convert step, or
-grab the base model for fine-tuning:
+### 2. Download the official GGUF (Q4_0)
+`huggingface-cli` is deprecated; use the Python API (single file, ~143 MB):
 
 ```sh
-pip install huggingface_hub
-# base model (for fine-tuning):
-huggingface-cli download LiquidAI/LFM2.5-230M --local-dir lfm-base
-# OR official GGUF (check which quants exist):
-huggingface-cli download LiquidAI/LFM2.5-230M-GGUF --local-dir lfm-gguf
+/home/raf/.venvs/lfm/bin/python -c "from huggingface_hub import hf_hub_download; \
+print(hf_hub_download('LiquidAI/LFM2.5-230M-GGUF', 'LFM2.5-230M-Q4_0.gguf', local_dir='/home/raf/lfm'))"
 ```
 
-### 3. Build the dataset + fine-tune (QLoRA)
+### 3. Build the dataset + fine-tune (optional, QLoRA)
 ```sh
 python3 train/reasoner/build_reason_dataset.py          # -> reason_dataset.jsonl
 ```
-Then QLoRA fine-tune `LiquidAI/LFM-1B` on that JSONL (chat format) with
-`transformers` + `peft` + `bitsandbytes` — a standard QLoRA run. On the RTX 4060
-(8 GB VRAM) a 1B model fine-tune is ~30–60 min.
+QLoRA fine-tune `LiquidAI/LFM2.5-230M` on that JSONL with `transformers` +
+`peft` + `bitsandbytes`. On the RTX 4060 (8 GB VRAM) a 0.2B fine-tune is quick.
 
-### 4. Convert → quantize to Q3 → plug in
+### 4. Plug into the agent
 ```sh
-bash train/reasoner/quantize_q3.sh lfm-1b-finetuned lfm-reasoner-q3
-# produces lfm-reasoner-q3_q3_k_m.gguf
-sudo python3 agent/xytro_agent.py --seconds 20 --live --ab --llm ./lfm-reasoner-q3_q3_k_m.gguf
+sudo python3 agent/xytro_agent.py --seconds 20 --live --ab --llm /home/raf/lfm/LFM2.5-230M-Q4_0.gguf
 ```
 
-The agent calls `llama-cli` with a telemetry summary, parses
-`STRATEGY=… REASON=…`, and **falls back to the deterministic rule-based
-reasoner** if the model is missing, slow, or errors — so this is purely an
-upgrade, never a single point of failure.
+### 4b. Quantize further (only after fine-tuning)
+```sh
+bash train/reasoner/quantize_q3.sh <hf-model-dir> lfm-reasoner-q3   # -> *q3_k_m.gguf
+```
 
-## Why Q3 (and the honest trade-off)
-- **Q3_K_M** is the smallest practical GGUF level → minimal RAM/CPU for a
-  background reasoner that wakes every ~30–60 s.
-- If you care more about answer quality than minimal footprint, **Q4_K_M or
-  Q5_K_M** preserve accuracy noticeably better while still being small
-  (LFM-1B at Q4 is ~0.8–1 GB). The agent integration is identical either way.
+## Runtime behavior (agent --llm)
+The agent runs `llama-simple` (the one-shot example binary — **not** `llama-cli`,
+which drops into an interactive REPL and hangs under subprocess):
+- prompt is wrapped in the **LFM2.5 chat template**
+  (`<|startoftext|><|im_start|>user …<|im_end|>\n<|im_start|>assistant`) plus a
+  **few-shot example** so the 0.2B model copies the exact output format;
+- runs detached (`stdin=/dev/null`, new session), captures **stdout only**
+  (stderr carries non-UTF-8 progress logs);
+- parses `STRATEGY=`/`REASON=`/`Explanation:` and falls back to scanning for a
+  strategy word in prose;
+- if the model is missing, slow, or errors it **falls back to the deterministic
+  rule-based reasoner** — this is purely an upgrade, never a single point of failure.
+
+## Why Q4_0 (and the honest trade-off)
+- **Q4_0** is the smallest official quant in the repo (143 MB); on a 46 GB RAM
+  box + RTX 4060 it's effectively free and fast (~0.6 s/decision).
+- If you want better answer quality, **Q4_K_M / Q5_K_M** preserve accuracy
+  better while still small. The agent integration is identical either way.
 
 ## Files
 - `build_reason_dataset.py` — audit log → chat-JSONL training pairs
-- `quantize_q3.sh` — HF → GGUF → Q3_K_M
-- `agent/xytro_agent.py --llm` — the runtime hook (rule-based fallback built in)
+- `quantize_q3.sh` — HF → GGUF → Q3_K_M (auto-detects llama.cpp tools; only
+  needed if you fine-tune)
+- `agent/xytro_agent.py --llm` — the runtime hook (`llama-simple` + rule-based fallback)
