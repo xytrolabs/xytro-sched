@@ -420,6 +420,72 @@ def record_exit(rc):
     _log({"event": "exit", "rc": int(rc)})
 
 
+def _write_config_from_live():
+    """Persist the current live policy into xytro.conf so a recovery rung
+    survives the next boot instead of re-attempting the config that broke."""
+    p = paths()
+    try:
+        d = get_live()
+        with open(p["config"], "w") as f:
+            f.write(render_config(d))
+    except Exception as e:  # noqa: BLE001
+        _log({"event": "recover_conf_warn", "reason": str(e)})
+
+
+def record_recovery():
+    """Advance the stall-recovery ladder one rung and apply that config.
+
+    Called by the boot wrapper when the previous loader run exited non-zero
+    (kernel watchdog stall / crash). xytro NEVER parks on stock CFS - each
+    rung re-attaches the scheduler with a progressively safer policy:
+
+      rung 1 (1st consecutive stall): last-known-good config (xytro.conf is
+                                      also reverted to match it)
+      rung 2 (2nd): built-in safe defaults (steer reset)
+      rung 3 (3rd+): defaults + dry-run (normal lane only) - xytro attached
+                     but inert; the absolute "not CFS" floor.
+
+    A clean run on the next boot (reset-stalls) clears the counter so the full
+    config is tried again. Returns (rung, stall_count).
+    """
+    p = paths()
+    st = _read_state()
+    n = st.get("stall_count", 0) + 1
+    if n == 1 and os.path.exists(p["known_bin"]):
+        restore_known_good()          # loads known-good + reverts xytro.conf
+        rung = "known-good"
+    else:
+        if n <= 2:
+            rc, out = steer(["reset"])
+            if rc != 0:
+                raise RuntimeError("recovery defaults failed: " +
+                                   out.strip()[:200])
+            rung = "defaults"
+        else:
+            rc, out = steer(["reset"])
+            rc2, out2 = steer(["dry-run", "1"])
+            if rc != 0 or rc2 != 0:
+                raise RuntimeError("recovery dry-run failed: " +
+                                   (out + out2).strip()[:200])
+            rung = "defaults+dry-run"
+        _write_config_from_live()     # persist the safe policy for next boot
+        st = _read_state()
+        st["last_exit"] = 0          # consume the broke flag
+        st["recoveries"] = st.get("recoveries", 0) + 1
+        _write_state(st)
+    st = _read_state()
+    st["stall_count"] = n
+    _write_state(st)
+    _log({"event": "recover", "rung": rung, "stall_count": n})
+    return rung, n
+
+
+def reset_stalls():
+    st = _read_state()
+    st["stall_count"] = 0
+    _write_state(st)
+
+
 def print_status(broke=False):
     p = paths()
     st = _read_state()
@@ -440,6 +506,7 @@ def print_status(broke=False):
           (datetime.datetime.fromtimestamp(la).isoformat(timespec="seconds")
            if la else "never"))
     print("last_loader_exit  %s" % st.get("last_exit", "n/a"))
+    print("stall_count       %s" % st.get("stall_count", 0))
     print("recoveries        %s" % st.get("recoveries", 0))
 
 
@@ -468,6 +535,9 @@ def main(argv=None):
 
     sub.add_parser("promote", help="mark the current live policy as known-good")
     sub.add_parser("restore", help="load known-good + revert xytro.conf")
+    sub.add_parser("recover", help="walk the stall-recovery ladder one rung "
+                  "(known-good -> defaults -> defaults+dry-run) and apply it")
+    sub.add_parser("reset-stalls", help="clear the consecutive-stall counter")
 
     a_status = sub.add_parser("status", help="print state / break flag")
     a_status.add_argument("--broke", action="store_true",
@@ -500,6 +570,12 @@ def main(argv=None):
         elif args.cmd == "restore":
             restore_known_good()
             print("restored last-known-good")
+        elif args.cmd == "recover":
+            rung, n = record_recovery()
+            print("recovered (rung %s, consecutive stalls %d)" % (rung, n))
+        elif args.cmd == "reset-stalls":
+            reset_stalls()
+            print("stall counter reset")
         elif args.cmd == "status":
             print_status(broke=args.broke)
         elif args.cmd == "record-exit":

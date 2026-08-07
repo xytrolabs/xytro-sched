@@ -36,13 +36,17 @@ if [ "$(cat /sys/kernel/sched_ext/state 2>/dev/null)" = "enabled" ]; then
     CONFIG="$("$PY" "$CFG" path config 2>/dev/null || true)"
     KNOWN="$("$PY" "$CFG" path known_bin 2>/dev/null || true)"
 
-    if [ "$("$PY" "$CFG" status --broke 2>/dev/null || echo no)" = "yes" ] \
-       && [ -n "$KNOWN" ] && [ -e "$KNOWN" ]; then
-        # Last run was killed by the kernel watchdog (or crashed): come back
-        # on the last config that actually worked, not the one that broke.
-        echo "xytro: previous run broke -> restoring last-known-good config"
-        "$PY" "$CFG" restore || echo "xytro: WARN known-good restore failed"
+    if [ "$("$PY" "$CFG" status --broke 2>/dev/null || echo no)" = "yes" ]; then
+        # Previous run was killed by the kernel watchdog (or crashed): walk the
+        # recovery ladder (known-good -> defaults -> defaults+dry-run) so xytro
+        # always re-attaches - it NEVER parks on stock CFS.
+        echo "xytro: previous run broke -> walking recovery ladder"
+        "$PY" "$CFG" recover || {
+            echo "xytro: WARN recovery failed; applying safe defaults"
+            "$STEER" reset || true
+        }
     elif [ -n "$CONFIG" ] && [ -e "$CONFIG" ]; then
+        "$PY" "$CFG" reset-stalls 2>/dev/null || true
         if "$PY" "$CFG" apply --bootstrap; then
             echo "xytro: applied config $CONFIG"
         elif [ -n "$KNOWN" ] && [ -e "$KNOWN" ]; then
