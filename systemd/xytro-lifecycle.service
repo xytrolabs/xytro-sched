@@ -1,0 +1,24 @@
+[Unit]
+Description=xytro-lifecycle resource manager (watch hogs -> freeze/prio)
+Documentation=https://github.com/xytrolabs/xytro-sched
+After=xytro-sched.service
+Wants=xytro-sched.service
+
+[Service]
+Type=simple
+# constrained phase = auto freeze/prio only (both reversible/safe); kill and
+# start are never auto-proposed in this phase, so the unattended service can't
+# harm anything. Each cycle watches 60s, acts on the worst hog, then exits;
+# Restart=always makes it continuous. The scheduler must be up first.
+ExecStart=/usr/bin/python3 /home/raf/Desktop/Linux-Xytro/agent/xytro_lifecycle.py watch --seconds 60 --live --phase constrained
+Restart=always
+RestartSec=5
+# The agent never runs hot; keep it off the fast lane of its own scheduler.
+Nice=10
+# Best-effort user-session access so outcome notifications reach the desktop.
+Environment=DISPLAY=:0
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+
+[Install]
+WantedBy=multi-user.target

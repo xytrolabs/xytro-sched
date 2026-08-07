@@ -22,6 +22,7 @@ chmod +x "$BASE/systemd/xytro-sched-start.sh"
 echo "== installing units =="
 cp "$BASE/systemd/xytro-sched.service" "$UNITDIR/"
 cp "$BASE/systemd/xytro-agent.service" "$UNITDIR/"
+cp "$BASE/systemd/xytro-lifecycle.service" "$UNITDIR/"
 systemctl daemon-reload
 
 echo "== installing passwordless sudoers drop-in (agent tools) =="
@@ -31,6 +32,7 @@ visudo -cf /etc/sudoers.d/xytro || { echo "sudoers syntax ERROR — aborting"; e
 echo "== enabling + starting =="
 systemctl enable --now xytro-sched.service
 systemctl enable --now xytro-agent.service
+systemctl enable --now xytro-lifecycle.service
 
 echo "== status =="
 sleep 3
@@ -41,4 +43,4 @@ echo
 echo "Scheduler state: $(cat /sys/kernel/sched_ext/state 2>/dev/null || echo 'unknown')"
 echo
 echo "Done. Disable with:"
-echo "  sudo systemctl disable --now xytro-agent.service xytro-sched.service"
+echo "  sudo systemctl disable --now xytro-agent.service xytro-lifecycle.service xytro-sched.service"
