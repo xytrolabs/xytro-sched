@@ -267,10 +267,13 @@ def llm_reason(args, m, phase):
 
     if not getattr(args, "llm", None):
         return None, None
-    exe = shutil.which("llama-simple")
-    if not exe:
-        print("--llm set but llama-simple not found; using rule-based reasoner")
-        return None, None
+    llm_is_dir = os.path.isdir(args.llm)
+    exe = None
+    if not llm_is_dir:
+        exe = shutil.which("llama-simple")
+        if not exe:
+            print("--llm set but llama-simple not found; using rule-based reasoner")
+            return None, None
     summary = "decisions=%d dec/s=%.0f fast_ratio=%.2f latency_p50=%s p90=%s p99=%sus phase=%s" % (
         m.dec, m.dec_per_s, m.fast_ratio,
         fmt(m.pct(0.50)), fmt(m.pct(0.90)), fmt(m.pct(0.99)), phase)
@@ -289,14 +292,29 @@ def llm_reason(args, m, phase):
     prompt = ("<|startoftext|><|im_start|>user\n" + user_msg +
               "<|im_end|>\n<|im_start|>assistant\n")
     try:
-        # llama-simple is a one-shot example binary (no interactive REPL): it
-        # prints the generation to stdout and exits. New session + /dev/null
-        # stdin keeps it fully detached; stderr carries logs (non-UTF-8 progress).
-        r = subprocess.run(
-            [exe, "-m", args.llm, "-n", "96", prompt],
-            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, start_new_session=True,
-            text=True, timeout=90)
+        if llm_is_dir:
+            # Fine-tuned HuggingFace model dir -> run the transformers helper
+            # under the ML venv (XYTRO_LFM_VENV_PY). Uses the exact fine-tuned
+            # weights; the GGUF path below stays for the lightweight build.
+            venv_py = os.environ.get(
+                "XYTRO_LFM_VENV_PY",
+                os.path.expanduser("~/.venvs/lfm/bin/python"))
+            r = subprocess.run(
+                [venv_py, os.path.join(ROOT, "train", "reasoner",
+                                       "generate_reason.py"),
+                 "--model", args.llm, "--prompt", prompt],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, start_new_session=True,
+                text=True, timeout=120)
+        else:
+            # GGUF -> llama-simple: one-shot example binary (no interactive
+            # REPL). New session + /dev/null stdin keeps it detached; stderr
+            # carries non-UTF-8 progress logs.
+            r = subprocess.run(
+                [exe, "-m", args.llm, "-n", "96", prompt],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, start_new_session=True,
+                text=True, timeout=90)
         out = r.stdout or ""
     except Exception as e:  # noqa: BLE001
         print("llm reasoner failed (%s); using rule-based reasoner" % e)

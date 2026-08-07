@@ -25,5 +25,9 @@ agent/frozen.json
 __pycache__/
 *.pyc
 
+# --- SLM fine-tune artifacts (regenerate; do not commit GB-sized models) ---
+train/reasoner/lfm-reasoner-lora*
+train/reasoner/*.gguf
+
 # --- misc ---
 nohup.out
