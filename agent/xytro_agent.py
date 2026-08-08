@@ -74,6 +74,11 @@ def _load_threshold_base():
 
 
 THRESHOLD_BASE = _load_threshold_base()
+# Never drive the fast-lane bar below 60% of the trained baseline: a lower bar
+# floods every CPU with fast-lane preemption and strands tail tasks (watchdog
+# "runnable task stall"). The preemption storm - not the score weights - is the
+# stall trigger observed live.
+THRESHOLD_FLOOR = int(THRESHOLD_BASE * 0.6)
 BASE_MIN = 250_000              # 0.25 ms
 BASE_MAX = 8_000_000            # 8 ms
 MULT_MIN = 500
@@ -85,8 +90,10 @@ AUDIT_MAX = 8 * 1024 * 1024     # housekeeping: rotate audit.log above 8 MiB
 # ---- strategy table: name -> (threshold_factor, base_slice_ns, fast_mult) --
 # threshold_factor is applied to the CURRENT threshold; slices in ns.
 STRATEGIES = {
-    # interactive: chase low latency -> lower bar, short slices
-    "interactive": (0.5, 1_000_000, 1000),
+    # interactive: chase low latency -> lower bar, short slices. Kept above the
+    # stall floor (0.7x not 0.5x): a very low fast-lane bar floods the CPUs with
+    # preemptions and strands tail tasks (kernel watchdog "runnable task stall").
+    "interactive": (0.7, 1_000_000, 1000),
     # throughput: keep long slices, neutral bar
     "throughput": (1.0, 2_000_000, 2000),
     # balanced: middle ground
@@ -408,7 +415,7 @@ def steer(pol, strat, live, audit):
     # strategy factor — NOT the current threshold. The old "current * factor"
     # ratcheted the bar down to the safety floor over many cycles (threshold
     # got stuck at 50k). Baseline follows the loaded policy file automatically.
-    new_thr = int(clamp(THRESHOLD_BASE * tf, THRESHOLD_MIN, THRESHOLD_MAX))
+    new_thr = int(clamp(THRESHOLD_BASE * tf, THRESHOLD_FLOOR, THRESHOLD_MAX))
     new_base = int(clamp(base, BASE_MIN, BASE_MAX))
     new_mult = int(clamp(mult, MULT_MIN, MULT_MAX))
 
@@ -562,7 +569,9 @@ def run_once(args):
         return True
 
     if exploring and random.random() < eps:
-        alt = random.choice(list(STRATEGIES))
+        # never explore the most aggressive strategy (it floods the fast lane
+        # and strands tasks - a stall trigger); stay within the safe set.
+        alt = random.choice([s for s in STRATEGIES if s != "interactive"])
         if alt != strat:
             print("  (EXPLORE) trying alternate strategy %s (was %s)"
                   % (alt, strat))
