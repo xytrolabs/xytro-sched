@@ -160,7 +160,7 @@ void BPF_STRUCT_OPS(xytro_enqueue, struct task_struct *p, u64 enq_flags)
 
 	tctx = get_task_ctx(p, true);
 	if (!tctx) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, enq_flags);
+		scx_bpf_dsq_insert(p, SCX_DSQ_GLOBAL, SCX_SLICE_DFL, enq_flags);
 		return;
 	}
 
@@ -238,15 +238,22 @@ void BPF_STRUCT_OPS(xytro_enqueue, struct task_struct *p, u64 enq_flags)
 			if (tctx && !tctx->target_idle)
 				scx_bpf_kick_cpu(tctx->target_cpu, SCX_KICK_PREEMPT);
 		} else
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, (u64)slice_ns, enq_flags);
-	} else
-		/* Slow lane: per-CPU local queue at TAIL (no preempt). A single
-		 * global FIFO can starve while every CPU stays busy with fast-lane
-		 * preemption (CPUs rarely go idle to drain it) — that made
-		 * kworkers/low-score tasks stall for seconds and trip the watchdog.
-		 * A per-CPU tail queue always makes progress on that CPU's next
-		 * slice, so tasks can never be stranded. */
+			/* Local queue is congested: don't add to it - let any CPU pick
+			 * this up from the shared queue instead. */
+			scx_bpf_dsq_insert(p, SCX_DSQ_GLOBAL, (u64)slice_ns, enq_flags);
+	} else if (prot)
+		/* Protected tasks (kernel threads, pid 1, the loader) must run
+		 * promptly on their own CPU; keep them on the local queue. */
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, (u64)slice_ns, enq_flags);
+	else
+		/* Slow lane: shared GLOBAL queue at TAIL (no preempt). A task here
+		 * can be run by ANY CPU, so it can never be stranded by being bound
+		 * to a busy (or non-affine) enqueue-CPU's local DSQ - the stranding
+		 * that tripped the watchdog (runnable task stall for 18+s). The
+		 * kernel's default dispatch drains GLOBAL whenever a CPU's local
+		 * queue empties; the fast-lane depth guard + threshold floor keep
+		 * the fast lane bounded so local queues empty regularly. */
+		scx_bpf_dsq_insert(p, SCX_DSQ_GLOBAL, (u64)slice_ns, enq_flags);
 }
 
 void BPF_STRUCT_OPS(xytro_running, struct task_struct *p)
