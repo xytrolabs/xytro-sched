@@ -35,11 +35,11 @@ BPF_CFLAGS := -g -O2 -target bpf -D__TARGET_ARCH_x86 -Wall
 
 .PHONY: all top steer clean vmlinux status
 
+all: $(LOADER) $(TOP) $(STEER)
+
 status:
 	chmod +x tools/xytro-status
 	./tools/xytro-status
-
-all: $(LOADER) $(TOP) $(STEER)
 
 top: $(TOP)
 

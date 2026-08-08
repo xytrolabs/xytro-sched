@@ -50,6 +50,13 @@ enum {
 /* Max active (foreground) tasks tracked in the xytro_active map. */
 #define XYTRO_ACTIVE_MAX  16
 
+/* Starvation guard: allow fast-lane HEAD + kick-preempt only while this CPU's
+ * local DSQ is at most this deep. Under a wakeup storm, an endless stream of
+ * HEAD/PREEMPT inserts would keep jumping ahead of the tail tasks in the same
+ * local DSQ and strand them for seconds (kernel watchdog "runnable task
+ * stall"). Deep queue -> still grant the fast slice but join at the tail. */
+#define XYTRO_FAST_HEAD_MAX 8
+
 /* Policy parameters — single element of the xytro_policy array map.
  * Hot-updatable at runtime by xytro-steer / the trainer.
  * score_raw = sum(weights[i] * feats[i]); fast lane iff score_raw >= threshold. */
