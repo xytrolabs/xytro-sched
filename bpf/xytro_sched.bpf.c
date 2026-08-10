@@ -225,22 +225,25 @@ void BPF_STRUCT_OPS(xytro_enqueue, struct task_struct *p, u64 enq_flags)
 		 * waking task preempts right now instead of waiting out the current
 		 * slice (which is what kept our p99 tail above CFS). Only kick a
 		 * busy CPU; an idle one runs the task immediately already. */
-		/* Starvation guard: only jump the line (HEAD + kick) while this CPU's
-		 * local queue is shallow. Under a wakeup storm an endless stream of
-		 * HEAD/PREEMPT inserts would jump ahead of the tail tasks in the SAME
-		 * local DSQ and strand them for seconds (kernel watchdog "runnable
-		 * task stall"). When the queue is deep we still grant the fast slice
-		 * but join at the tail, so the tail always makes progress within a
-		 * few slices. */
-		if (scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL) <= XYTRO_FAST_HEAD_MAX) {
+		/* Stranding guards: use LOCAL+HEAD+kick only when BOTH (a) we are
+		 * enqueueing on the CPU the task was selected for (target_cpu) and
+		 * (b) this CPU's local queue is shallow. A task enqueued on a
+		 * different CPU than its target is bound to the wrong local DSQ and
+		 * can strand there for seconds (kernel watchdog "runnable task
+		 * stall"); a deep local queue means this CPU is congested. In either
+		 * case route to the shared queue (any affine CPU can run it) and
+		 * still kick the target so it can drain it immediately. */
+		if (tctx && tctx->target_cpu == bpf_get_smp_processor_id() &&
+		    scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL) <= XYTRO_FAST_HEAD_MAX) {
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, (u64)slice_ns,
 					   enq_flags | XYTRO_ENQ_HEAD | XYTRO_ENQ_PREEMPT);
+			if (!tctx->target_idle)
+				scx_bpf_kick_cpu(tctx->target_cpu, SCX_KICK_PREEMPT);
+		} else {
+			scx_bpf_dsq_insert(p, SCX_DSQ_GLOBAL, (u64)slice_ns, enq_flags);
 			if (tctx && !tctx->target_idle)
 				scx_bpf_kick_cpu(tctx->target_cpu, SCX_KICK_PREEMPT);
-		} else
-			/* Local queue is congested: don't add to it - let any CPU pick
-			 * this up from the shared queue instead. */
-			scx_bpf_dsq_insert(p, SCX_DSQ_GLOBAL, (u64)slice_ns, enq_flags);
+		}
 	} else if (prot)
 		/* Protected tasks (kernel threads, pid 1, the loader) must run
 		 * promptly on their own CPU; keep them on the local queue. */
