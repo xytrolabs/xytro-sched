@@ -221,16 +221,16 @@ void BPF_STRUCT_OPS(xytro_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 
 	if (fast) {
-		/* Route the fast lane to the CPU the task was selected for, via that
-		 * CPU's own per-CPU DSQ, and kick it. The owning CPU's dispatch op
-		 * (xytro_dispatch) drains this DSQ straight to its runqueue, so a
-		 * wakeup runs immediately instead of waiting on the kernel's lazy
-		 * default GLOBAL drain (the source of 15-20s "runnable task stall"
-		 * under sustained load) and never lands on a wrong CPU's LOCAL queue
-		 * (the earlier stranding bug). select_cpu already picked an affine
-		 * CPU, so the task is affinity-safe here. */
+		/* Route the fast lane to the CPU the task was selected for via the
+		 * kernel's native per-CPU "local-on" dispatch queue
+		 * (SCX_DSQ_LOCAL_ON | cpu), and kick that CPU. The kernel dispatches a
+		 * local-on queue natively, so a wakeup runs immediately on its target
+		 * CPU - it never waits on the lazy default GLOBAL drain (the source of
+		 * 15-20s "runnable task stall" under sustained load) and never lands
+		 * on a wrong CPU's LOCAL queue (the earlier stranding bug). select_cpu
+		 * already picked an affine CPU, so this is safe. */
 		if (tctx && tctx->target_cpu >= 0) {
-			scx_bpf_dsq_insert(p, XYTRO_FAST_DSQ(tctx->target_cpu),
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | (u32)tctx->target_cpu,
 					   (u64)slice_ns,
 					   enq_flags | XYTRO_ENQ_HEAD | XYTRO_ENQ_PREEMPT);
 			if (!tctx->target_idle)
@@ -314,33 +314,8 @@ void BPF_STRUCT_OPS(xytro_stopping, struct task_struct *p, bool runnable)
 	bpf_ringbuf_submit(evt, 0);
 }
 
-/* Per-CPU fast-lane dispatch. Called whenever CPU @cpu is choosing its next
- * task. Drains this CPU's own fast DSQ first (tasks there were selected for
- * this CPU by select_cpu, so they are affinity-safe), then the shared GLOBAL
- * queue (the kernel's move_to_local only takes tasks that can run on this CPU,
- * so draining GLOBAL here is also safe). An explicit dispatch op guarantees a
- * runnable task is actively pulled onto the runqueue instead of sitting in a
- * DSQ waiting for a lazy default drain event. */
-void BPF_STRUCT_OPS(xytro_dispatch, s32 cpu, struct task_struct *prev)
-{
-	scx_bpf_dsq_move_to_local(XYTRO_FAST_DSQ(cpu), 0);
-	scx_bpf_dsq_move_to_local(SCX_DSQ_GLOBAL, 0);
-}
-
 s32 BPF_STRUCT_OPS_SLEEPABLE(xytro_init)
 {
-	u64 nr_cpus = scx_bpf_nr_cpu_ids();
-	s32 cpu, ret;
-
-	if (nr_cpus > 1024) {
-		scx_bpf_error("nr_cpu_ids (%llu) exceeds max supported (1024)", nr_cpus);
-		return -E2BIG;
-	}
-	bpf_for(cpu, 0, nr_cpus) {
-		ret = scx_bpf_create_dsq(XYTRO_FAST_DSQ(cpu), -1);
-		if (ret)
-			scx_bpf_error("failed to create fast DSQ for cpu %d (ret %d)", cpu, ret);
-	}
 	return 0;
 }
 
@@ -351,7 +326,8 @@ void BPF_STRUCT_OPS(xytro_exit, struct scx_exit_info *info)
 
 SCX_OPS_DEFINE(xytro_ops,
 	       .select_cpu		= (void *)xytro_select_cpu,
-	       .enqueue			= (void *)xytro_enqueue,	       .dispatch			= (void *)xytro_dispatch,	       .running			= (void *)xytro_running,
+	       .enqueue			= (void *)xytro_enqueue,
+	       .running			= (void *)xytro_running,
 	       .stopping		= (void *)xytro_stopping,
 	       .init			= (void *)xytro_init,
 	       .exit			= (void *)xytro_exit,
