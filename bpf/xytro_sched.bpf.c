@@ -154,6 +154,7 @@ void BPF_STRUCT_OPS(xytro_enqueue, struct task_struct *p, u64 enq_flags)
 	struct xytro_evt *evt;
 	s32 feats[XYTRO_NR_FEATS];
 	s32 score = 0, slice_ns = SCX_SLICE_DFL;
+	s32 pcpu = -1;
 	u32 key = 0;
 	bool fast = false, prot = false, act = false;
 	int i;
@@ -238,10 +239,23 @@ void BPF_STRUCT_OPS(xytro_enqueue, struct task_struct *p, u64 enq_flags)
 		} else {
 			scx_bpf_dsq_insert(p, SCX_DSQ_GLOBAL, (u64)slice_ns, enq_flags);
 		}
-	} else if (prot)
-		/* Protected tasks (kernel threads, pid 1, the loader) must run
-		 * promptly on their own CPU; keep them on the local queue. */
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, (u64)slice_ns, enq_flags);
+	} else if (prot) {
+		/* Protected tasks (kernel threads like kworkers, pid 1, the loader)
+		 * are often CPU-affine-bound (e.g. kworker/12 is pinned to CPU 12).
+		 * Routing them to SCX_DSQ_LOCAL puts them on the ENQUEUEING cpu's
+		 * local queue - if the wakeup lands on a different cpu than the one
+		 * the task is bound to, nothing can ever run it there and it strands
+		 * for the whole watchdog period (this is exactly what the kworker
+		 * "runnable task stall" events were). Route to the task's own cpu's
+		 * native local-on queue instead, so its affine cpu runs it. */
+		pcpu = (tctx && tctx->target_cpu >= 0) ? tctx->target_cpu
+						       : (s32)scx_bpf_task_cpu(p);
+		if (pcpu >= 0)
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | (u32)pcpu,
+					   (u64)slice_ns, enq_flags);
+		else
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, (u64)slice_ns, enq_flags);
+	}
 	else
 		/* Slow lane: shared GLOBAL queue at TAIL (no preempt). A task here
 		 * can be run by ANY CPU, so it can never be stranded by being bound
