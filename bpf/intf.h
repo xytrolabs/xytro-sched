@@ -57,16 +57,6 @@ enum {
  * stall"). Deep queue -> still grant the fast slice but join at the tail. */
 #define XYTRO_FAST_HEAD_MAX 8
 
-/* Per-CPU fast-lane dispatch-queue base. Each CPU owns one; a fast-lane wakeup
- * is routed to the CPU it was selected for, and that CPU's dispatch op drains
- * the queue to its runqueue immediately. This removes BOTH prior stranding
- * causes: (1) tasks landing on a wrong CPU's LOCAL queue, and (2) tasks left
- * in GLOBAL waiting on the kernel's lazy default drain (15-20s watchdog stall
- * under sustained load). The base must stay well below SCX_DSQ_LOCAL/GLOBAL
- * (the top two u64 values) -- 2048 + 1024 CPUs is safely clear. */
-#define XYTRO_FAST_DSQ_BASE 2048ULL
-#define XYTRO_FAST_DSQ(cpu) (XYTRO_FAST_DSQ_BASE + (__u32)(cpu))
-
 /* Policy parameters — single element of the xytro_policy array map.
  * Hot-updatable at runtime by xytro-steer / the trainer.
  * score_raw = sum(weights[i] * feats[i]); fast lane iff score_raw >= threshold. */
