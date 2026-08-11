@@ -99,6 +99,23 @@ static bool is_active_task(struct task_struct *p)
 	return false;
 }
 
+/* Pick a CPU guaranteed to be in the task's affinity mask, for safe
+ * SCX_DSQ_LOCAL_ON routing. The kernel REJECTS a LOCAL_ON insert when the
+ * target CPU is not in the task's cpus_ptr (runtime error: "SCX_DSQ_LOCAL[_ON]
+ * target CPU N not allowed"), which crash-loops the loader. Prefer @preferred
+ * (e.g. select_cpu's target) only if it is affine; else fall back to the task's
+ * current CPU (always affine); else -1 (caller falls back to the shared queue).
+ */
+static s32 pick_affine_cpu(struct task_struct *p, s32 preferred)
+{
+	if (preferred >= 0 && bpf_cpumask_test_cpu(preferred, p->cpus_ptr))
+		return preferred;
+	preferred = (s32)scx_bpf_task_cpu(p);
+	if (preferred >= 0 && bpf_cpumask_test_cpu(preferred, p->cpus_ptr))
+		return preferred;
+	return -1;
+}
+
 static void fill_feats(struct task_struct *p, struct task_ctx *tctx,
 		       u64 enq_flags, s32 feats[XYTRO_NR_FEATS])
 {
@@ -222,39 +239,41 @@ void BPF_STRUCT_OPS(xytro_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 
 	if (fast) {
-		/* Route the fast lane to the CPU the task was selected for via the
-		 * kernel's native per-CPU "local-on" dispatch queue
+		/* Route the fast lane to a CPU that is guaranteed in the task's
+		 * affinity mask (select_cpu's target if affine, else the task's own
+		 * CPU), via the kernel's native per-CPU "local-on" dispatch queue
 		 * (SCX_DSQ_LOCAL_ON | cpu), and kick that CPU. The kernel dispatches a
-		 * local-on queue natively, so a wakeup runs immediately on its target
-		 * CPU - it never waits on the lazy default GLOBAL drain (the source of
-		 * 15-20s "runnable task stall" under sustained load) and never lands
-		 * on a wrong CPU's LOCAL queue (the earlier stranding bug). select_cpu
-		 * already picked an affine CPU, so this is safe. */
-		if (tctx && tctx->target_cpu >= 0) {
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | (u32)tctx->target_cpu,
+		 * local-on queue natively, so a wakeup runs immediately on its CPU - it
+		 * never waits on the lazy default GLOBAL drain and never lands on a
+		 * wrong CPU's LOCAL queue (the earlier stranding bug). pick_affine_cpu()
+		 * guarantees the CPU is allowed, so we never hit the "target CPU not
+		 * allowed" runtime error. */
+		pcpu = (tctx && tctx->target_cpu >= 0)
+			? pick_affine_cpu(p, tctx->target_cpu)
+			: pick_affine_cpu(p, -1);
+		if (pcpu >= 0) {
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | (u32)pcpu,
 					   (u64)slice_ns,
 					   enq_flags | XYTRO_ENQ_HEAD | XYTRO_ENQ_PREEMPT);
 			if (!tctx->target_idle)
-				scx_bpf_kick_cpu(tctx->target_cpu, SCX_KICK_PREEMPT);
+				scx_bpf_kick_cpu(pcpu, SCX_KICK_PREEMPT);
 		} else {
 			scx_bpf_dsq_insert(p, SCX_DSQ_GLOBAL, (u64)slice_ns, enq_flags);
 		}
 	} else if (prot) {
 		/* Protected tasks (kernel threads like kworkers, pid 1, the loader)
 		 * are often CPU-affine-bound (e.g. kworker/12 is pinned to CPU 12).
-		 * Routing them to SCX_DSQ_LOCAL puts them on the ENQUEUEING cpu's
-		 * local queue - if the wakeup lands on a different cpu than the one
-		 * the task is bound to, nothing can ever run it there and it strands
-		 * for the whole watchdog period (this is exactly what the kworker
-		 * "runnable task stall" events were). Route to the task's own cpu's
-		 * native local-on queue instead, so its affine cpu runs it. */
-		pcpu = (tctx && tctx->target_cpu >= 0) ? tctx->target_cpu
-						       : (s32)scx_bpf_task_cpu(p);
+		 * Route to their OWN CPU's native local-on queue (via pick_affine_cpu,
+		 * which uses the task's current CPU - always affine) so it runs on a
+		 * CPU it is allowed on. This avoids BOTH the stranding of SCX_DSQ_LOCAL
+		 * (the enqueueing cpu may not be affine) and the "target CPU not
+		 * allowed" runtime error of an unguarded LOCAL_ON. */
+		pcpu = pick_affine_cpu(p, -1);
 		if (pcpu >= 0)
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | (u32)pcpu,
 					   (u64)slice_ns, enq_flags);
 		else
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, (u64)slice_ns, enq_flags);
+			scx_bpf_dsq_insert(p, SCX_DSQ_GLOBAL, (u64)slice_ns, enq_flags);
 	}
 	else
 		/* Slow lane: shared GLOBAL queue at TAIL (no preempt). A task here
